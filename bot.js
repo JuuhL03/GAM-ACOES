@@ -15,11 +15,17 @@ const { generateReportImage } = require('./generateImage');
 const fs = require('fs');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
-const pending = new Map();
-const pendingDM = new Map();
+const pending         = new Map(); // estado do formulário por usuário
+const pendingDM       = new Map(); // aguardando confirmação de DM
+const threadSetupMsgs = new Map(); // threadId → { setupMsgId, originalMsgId }
 
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -27,7 +33,10 @@ const ACOES = [
   'Carro Forte Açougue', 'Carro Forte Groove', 'Carro Forte Faculdade',
 ];
 
-// ── Ready ─────────────────────────────────────────────────────────────────────
+const URL_REGEX   = /https?:\/\/\S+/i;
+const CHECK_EMOJI = '<:right:1330606335988990045>';
+
+// ── Ready ──────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
 
@@ -44,7 +53,64 @@ client.once('ready', async () => {
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
 
-// ── Helper: abre os selects de avaliação (usado pelo /relatorio e pelo botão fixo) ──
+// ── Auto-thread ao postar link ou arquivo ──────────────────────────────────────
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
+
+  const temLink    = URL_REGEX.test(message.content);
+  const temArquivo = message.attachments.size > 0;
+  if (!temLink && !temArquivo) return;
+
+  try {
+    const thread = await message.startThread({
+      name: `Avaliação — ${message.member?.displayName ?? message.author.username}`,
+      autoArchiveDuration: 1440,
+    });
+
+    const botao = new ButtonBuilder()
+      .setCustomId('iniciar_avaliacao')
+      .setLabel('📋  Iniciar Avaliação')
+      .setStyle(ButtonStyle.Primary);
+
+    const setupMsg = await thread.send({
+      content: '## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.',
+      components: [new ActionRowBuilder().addComponents(botao)],
+    });
+
+    // salva setupMsgId e originalMsgId para limpeza e reação posterior
+    threadSetupMsgs.set(thread.id, {
+      setupMsgId:    setupMsg.id,
+      originalMsgId: message.id,
+    });
+
+    console.log(`✅ Thread criada para ${message.member?.displayName}`);
+
+    // ── DM para todos com ALLOWED_ROLE_ID ─────────────────────────────────
+    const guild       = message.guild;
+    const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+
+    if (allowedRole) {
+      const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
+      const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${message.member?.displayName ?? message.author.username}\n**Acesse a thread:** ${threadLink}`;
+
+      for (const [, member] of allowedRole.members) {
+        if (member.user.bot) continue;
+        try {
+          await member.send(dmTexto);
+          console.log(`✉️  DM enviada para ${member.displayName}`);
+        } catch {
+          console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName} (DMs fechadas)`);
+        }
+      }
+    }
+
+  } catch (err) {
+    console.error('❌ Erro ao criar thread:', err.message);
+  }
+});
+
+// ── Helper: abre selects de avaliação ─────────────────────────────────────────
 async function abrirSelects(interaction) {
   const allowedRole = process.env.ALLOWED_ROLE_ID;
   if (allowedRole && !interaction.member.roles.cache.has(allowedRole)) {
@@ -54,7 +120,7 @@ async function abrirSelects(interaction) {
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const role = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
+  const role    = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
   const pilotos = role
     ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
     : [];
@@ -64,7 +130,13 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  pending.set(interaction.user.id, { channelId: interaction.channelId });
+  const threadData = threadSetupMsgs.get(interaction.channelId);
+
+  pending.set(interaction.user.id, {
+    channelId:     interaction.channelId,
+    setupMsgId:    threadData?.setupMsgId    ?? null,
+    originalMsgId: threadData?.originalMsgId ?? null,
+  });
 
   await interaction.editReply({
     content: '**Novo Relatório** — preencha os campos abaixo e clique em **Abrir formulário**.',
@@ -96,7 +168,7 @@ async function abrirSelects(interaction) {
           .setPlaceholder('4️⃣  Ação com Atirador?')
           .addOptions([
             { label: '🎯  Sim, com atirador', value: 'sim' },
-            { label: '❌   Não', value: 'nao' },
+            { label: '❌   Não',              value: 'nao' },
           ])
       ),
       new ActionRowBuilder().addComponents(
@@ -109,28 +181,29 @@ async function abrirSelects(interaction) {
   });
 }
 
-// ── Interactions ──────────────────────────────────────────────────────────────
+// ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // ── /relatorio ──────────────────────────────────────────────────────────────
+  // /relatorio
   if (interaction.isChatInputCommand() && interaction.commandName === 'relatorio') {
     await abrirSelects(interaction);
+    return;
   }
 
-  // ── Botão fixo "Iniciar Avaliação" ─────────────────────────────────────────
+  // Botão fixo dentro da thread
   if (interaction.isButton() && interaction.customId === 'iniciar_avaliacao') {
     await abrirSelects(interaction);
     return;
   }
 
-  // ── Selects ─────────────────────────────────────────────────────────────────
+  // ── Selects ──────────────────────────────────────────────────────────────────
   if (interaction.isStringSelectMenu()) {
     const state = pending.get(interaction.user.id);
     if (!state) { await interaction.deferUpdate(); return; }
 
-    if (interaction.customId === 'sel_resultado') state.resultado  = interaction.values[0];
-    if (interaction.customId === 'sel_acao')      state.acao       = interaction.values[0];
-    if (interaction.customId === 'sel_atirador')  state.atirador   = interaction.values[0] === 'sim';
+    if (interaction.customId === 'sel_resultado') state.resultado = interaction.values[0];
+    if (interaction.customId === 'sel_acao')      state.acao      = interaction.values[0];
+    if (interaction.customId === 'sel_atirador')  state.atirador  = interaction.values[0] === 'sim';
     if (interaction.customId === 'sel_piloto') {
       const m = interaction.guild.members.cache.get(interaction.values[0]);
       state.pilotoId   = interaction.values[0];
@@ -138,9 +211,10 @@ client.on('interactionCreate', async (interaction) => {
     }
     pending.set(interaction.user.id, state);
     await interaction.deferUpdate();
+    return;
   }
 
-  // ── Botão "Abrir formulário" ────────────────────────────────────────────────
+  // ── Botão "Abrir formulário" ──────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
     if (!state?.resultado || !state?.acao || !state?.pilotoNome || state.atirador === undefined) {
@@ -189,9 +263,10 @@ client.on('interactionCreate', async (interaction) => {
       );
       await interaction.showModal(modal);
     }
+    return;
   }
 
-  // ── Modal único (sem atirador) ──────────────────────────────────────────────
+  // ── Modal único (sem atirador) ────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_completo') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
@@ -207,9 +282,10 @@ client.on('interactionCreate', async (interaction) => {
       negativos: interaction.fields.getTextInputValue('negativos'),
       autor:     interaction.member.displayName,
     });
+    return;
   }
 
-  // ── Modal com atirador parte 1 ──────────────────────────────────────────────
+  // ── Modal atirador parte 1 ────────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_1') {
     const state = pending.get(interaction.user.id) ?? {};
     state.data    = interaction.fields.getTextInputValue('data');
@@ -225,9 +301,10 @@ client.on('interactionCreate', async (interaction) => {
       )],
       flags: MessageFlags.Ephemeral,
     });
+    return;
   }
 
-  // ── Botão parte 2 ───────────────────────────────────────────────────────────
+  // ── Botão parte 2 ─────────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_parte2') {
     const modal2 = new ModalBuilder().setCustomId('form_atirador_2').setTitle('Análise — Parte 2/2');
     modal2.addComponents(
@@ -242,9 +319,10 @@ client.on('interactionCreate', async (interaction) => {
       ),
     );
     await interaction.showModal(modal2);
+    return;
   }
 
-  // ── Modal com atirador parte 2 ──────────────────────────────────────────────
+  // ── Modal atirador parte 2 ────────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_2') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
@@ -258,24 +336,29 @@ client.on('interactionCreate', async (interaction) => {
       negativos:     interaction.fields.getTextInputValue('negativos'),
       autor:         interaction.member.displayName,
     });
+    return;
   }
 
-  // ── Botões de confirmação de DM ─────────────────────────────────────────────
+  // ── Botão DM — Não ───────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'dm_nao') {
     const dmData = pendingDM.get(interaction.user.id);
     pendingDM.delete(interaction.user.id);
     if (dmData) fs.unlink(dmData.imagePath, () => {});
     await interaction.update({ content: '✅ Relatório postado!', components: [] });
+    await finalizarThread(dmData);
     return;
   }
 
+  // ── Botão DM — Sim ───────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'dm_sim') {
     const dmData = pendingDM.get(interaction.user.id);
     pendingDM.delete(interaction.user.id);
+
     if (!dmData) {
       await interaction.update({ content: '✅ Relatório postado!', components: [] });
       return;
     }
+
     try {
       const membro = await interaction.guild.members.fetch(dmData.pilotoId);
       await membro.send({
@@ -283,31 +366,77 @@ client.on('interactionCreate', async (interaction) => {
         files: [dmData.imagePath],
       });
       await interaction.update({ content: `✅ Relatório postado e enviado por DM para **${dmData.pilotoNome}**!`, components: [] });
-    } catch (err) {
+    } catch {
       await interaction.update({ content: `✅ Relatório postado, mas não foi possível enviar DM para **${dmData.pilotoNome}** (pode estar com DMs fechadas).`, components: [] });
     } finally {
       fs.unlink(dmData.imagePath, () => {});
     }
+
+    await finalizarThread(dmData);
     return;
   }
 
 });
 
+// ── Helper: apaga msg de avaliação da thread + reação na msg original ──────────
+async function finalizarThread(dmData) {
+  if (!dmData) return;
+
+  // apaga mensagem de avaliação da thread
+  if (dmData.setupMsgId && dmData.channelId) {
+    try {
+      const thread   = await client.channels.fetch(dmData.channelId);
+      const setupMsg = await thread.messages.fetch(dmData.setupMsgId);
+      await setupMsg.delete();
+      threadSetupMsgs.delete(dmData.channelId);
+      console.log('🧹 Mensagem de avaliação removida da thread.');
+    } catch (err) {
+      console.warn('⚠️  Não foi possível apagar mensagem da thread:', err.message);
+    }
+  }
+
+  // reação ✅ na mensagem original do canal
+  if (dmData.originalMsgId) {
+    try {
+      const canal      = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
+      const originalMsg = await canal.messages.fetch(dmData.originalMsgId);
+      await originalMsg.react('1330606335988990045');
+      console.log('✅ Reação adicionada na mensagem original.');
+    } catch (err) {
+      console.warn('⚠️  Não foi possível reagir na mensagem original:', err.message);
+    }
+  }
+}
+
 // ── Helper: gera imagem e posta no canal ──────────────────────────────────────
 async function gerarEPostar(interaction, dados) {
   try {
     const imagePath = await generateReportImage(dados);
-    const canal = client.channels.cache.get(dados.channelId);
+    const canal     = client.channels.cache.get(dados.channelId);
+
     if (!canal) {
       await interaction.editReply({ content: '❌ Não consegui acessar o canal. Verifique as permissões do bot.' });
       return;
     }
+
     await canal.send({ files: [imagePath] });
 
     if (dados.pilotoId) {
-      pendingDM.set(interaction.user.id, { imagePath, pilotoId: dados.pilotoId, pilotoNome: dados.pilotoNome, acao: dados.acao, data: dados.data, autor: dados.autor });
+      pendingDM.set(interaction.user.id, {
+        imagePath,
+        pilotoId:      dados.pilotoId,
+        pilotoNome:    dados.pilotoNome,
+        acao:          dados.acao,
+        data:          dados.data,
+        autor:         dados.autor,
+        channelId:     dados.channelId,
+        setupMsgId:    dados.setupMsgId    ?? null,
+        originalMsgId: dados.originalMsgId ?? null,
+      });
+
       const btnSim = new ButtonBuilder().setCustomId('dm_sim').setLabel('✉️  Sim, enviar').setStyle(ButtonStyle.Success);
       const btnNao = new ButtonBuilder().setCustomId('dm_nao').setLabel('Não').setStyle(ButtonStyle.Secondary);
+
       await interaction.editReply({
         content: `✅ Relatório postado!\n\nDeseja enviar o relatório por DM para **${dados.pilotoNome}**?`,
         components: [new ActionRowBuilder().addComponents(btnSim, btnNao)],
@@ -315,6 +444,7 @@ async function gerarEPostar(interaction, dados) {
     } else {
       await interaction.editReply({ content: '✅ Relatório postado!' });
       fs.unlink(imagePath, () => {});
+      await finalizarThread(dados);
     }
   } catch (err) {
     console.error(err);
