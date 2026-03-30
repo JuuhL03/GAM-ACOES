@@ -124,6 +124,11 @@ function fieldStyle(label) {
 }
 
 async function generateReportImage(dados) {
+
+  console.log('🔤 Font dir existe?', fs.existsSync(path.join(__dirname, 'fonts')));
+  console.log('🔤 Roboto-Regular existe?', fs.existsSync(path.join(__dirname, 'fonts', 'Roboto-Regular.ttf')));
+  console.log('🔤 campos com valor:', dados.spots, dados.calls, dados.melhorias, dados.negativos);
+  
   const campos = [
     { label: 'Spots',            valor: dados.spots },
     { label: 'Calls',            valor: dados.calls },
