@@ -144,6 +144,8 @@ function fieldStyle(label) {
 
 async function generateReportImage(dados) {
   await ensureFonts();
+  console.log('🔤 Tamanho Regular:', fs.statSync(fontRegular).size, 'bytes');
+  console.log('🔤 Tamanho Bold:', fs.statSync(fontBold).size, 'bytes');
   console.log('🔤 Font dir existe?', fs.existsSync(path.join(__dirname, 'fonts')));
   console.log('🔤 Roboto-Regular existe?', fs.existsSync(path.join(__dirname, 'fonts', 'Roboto-Regular.ttf')));
   console.log('🔤 campos com valor:', dados.spots, dados.calls, dados.melhorias, dados.negativos);
