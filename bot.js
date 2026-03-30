@@ -19,7 +19,7 @@ const client = new Client({
 });
 
 const pending = new Map();
-const pendingDM = new Map(); // armazena imagem gerada aguardando confirmação de DM
+const pendingDM = new Map();
 
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -27,90 +27,124 @@ const ACOES = [
   'Carro Forte Açougue', 'Carro Forte Groove', 'Carro Forte Faculdade',
 ];
 
-client.once('clientReady', async () => {
+// ── Ready ─────────────────────────────────────────────────────────────────────
+client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
-const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
-if (mainGuild) {
-  try {
-    await mainGuild.members.fetch();
-    console.log(`✅ Cache carregado: ${mainGuild.name}`);
+
+  const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (mainGuild) {
+    try {
+      await mainGuild.members.fetch();
+      console.log(`✅ Cache carregado: ${mainGuild.name}`);
     } catch (e) {
-    console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message);
+      console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message);
+    }
+  }
+
+  // ── Mensagem fixa de avaliação ────────────────────────────────────────────
+  if (process.env.SETUP_CHANNEL_ID) {
+    try {
+      const canal = await client.channels.fetch(process.env.SETUP_CHANNEL_ID);
+
+      const botao = new ButtonBuilder()
+        .setCustomId('iniciar_avaliacao')
+        .setLabel('📋  Iniciar Avaliação')
+        .setStyle(ButtonStyle.Primary);
+
+      await canal.send({
+        content: '## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.',
+        components: [new ActionRowBuilder().addComponents(botao)],
+      });
+
+      console.log('✅ Mensagem de avaliação postada no canal de setup.');
+    } catch (err) {
+      console.error('❌ Erro ao postar mensagem de setup:', err.message);
     }
   }
 });
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
 
-// ── /relatorio ────────────────────────────────────────────────────────────────
-client.on('interactionCreate', async (interaction) => {
-
-  if (interaction.isChatInputCommand() && interaction.commandName === 'relatorio') {
-    // Verifica se quem usou tem o cargo autorizado
-    const allowedRole = process.env.ALLOWED_ROLE_ID;
-    if (allowedRole && !interaction.member.roles.cache.has(allowedRole)) {
-      await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const role = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
-    const pilotos = role
-      ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
-      : [];
-
-    if (!pilotos.length) {
-      await interaction.editReply({ content: '❌ Nenhum membro com o cargo configurado. Verifique `PILOT_ROLE_ID`.' });
-      return;
-    }
-
-    pending.set(interaction.user.id, { channelId: interaction.channelId });
-
-    await interaction.editReply({
-      content: '**Novo Relatório** — preencha os campos abaixo e clique em **Abrir formulário**.',
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('sel_resultado')
-            .setPlaceholder('1️⃣  Resultado')
-            .addOptions([
-              { label: '✅  Vitória', value: 'Vitória' },
-              { label: '❌  Derrota', value: 'Derrota' },
-            ])
-        ),
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('sel_acao')
-            .setPlaceholder('2️⃣  Ação')
-            .addOptions(ACOES.map(a => ({ label: a, value: a })))
-        ),
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('sel_piloto')
-            .setPlaceholder('3️⃣  Piloto analisado')
-            .addOptions(pilotos)
-        ),
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('sel_atirador')
-            .setPlaceholder('4️⃣  Ação com Atirador?')
-            .addOptions([
-              { label: '🎯  Sim, com atirador', value: 'sim' },
-              { label: '❌   Não', value: 'nao' },
-            ])
-        ),
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('btn_abrir_form')
-            .setLabel('Abrir formulário →')
-            .setStyle(ButtonStyle.Primary)
-        ),
-      ],
-    });
+// ── Helper: abre os selects de avaliação (usado pelo /relatorio e pelo botão fixo) ──
+async function abrirSelects(interaction) {
+  const allowedRole = process.env.ALLOWED_ROLE_ID;
+  if (allowedRole && !interaction.member.roles.cache.has(allowedRole)) {
+    await interaction.reply({ content: '❌ Você não tem permissão para usar isto.', flags: MessageFlags.Ephemeral });
+    return;
   }
 
-  // ── Selects ───────────────────────────────────────────────────────────────
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const role = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
+  const pilotos = role
+    ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
+    : [];
+
+  if (!pilotos.length) {
+    await interaction.editReply({ content: '❌ Nenhum membro com o cargo configurado. Verifique `PILOT_ROLE_ID`.' });
+    return;
+  }
+
+  pending.set(interaction.user.id, { channelId: interaction.channelId });
+
+  await interaction.editReply({
+    content: '**Novo Relatório** — preencha os campos abaixo e clique em **Abrir formulário**.',
+    components: [
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('sel_resultado')
+          .setPlaceholder('1️⃣  Resultado')
+          .addOptions([
+            { label: '✅  Vitória', value: 'Vitória' },
+            { label: '❌  Derrota', value: 'Derrota' },
+          ])
+      ),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('sel_acao')
+          .setPlaceholder('2️⃣  Ação')
+          .addOptions(ACOES.map(a => ({ label: a, value: a })))
+      ),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('sel_piloto')
+          .setPlaceholder('3️⃣  Piloto analisado')
+          .addOptions(pilotos)
+      ),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('sel_atirador')
+          .setPlaceholder('4️⃣  Ação com Atirador?')
+          .addOptions([
+            { label: '🎯  Sim, com atirador', value: 'sim' },
+            { label: '❌   Não', value: 'nao' },
+          ])
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_abrir_form')
+          .setLabel('Abrir formulário →')
+          .setStyle(ButtonStyle.Primary)
+      ),
+    ],
+  });
+}
+
+// ── Interactions ──────────────────────────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+
+  // ── /relatorio ──────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'relatorio') {
+    await abrirSelects(interaction);
+  }
+
+  // ── Botão fixo "Iniciar Avaliação" ─────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId === 'iniciar_avaliacao') {
+    await abrirSelects(interaction);
+    return;
+  }
+
+  // ── Selects ─────────────────────────────────────────────────────────────────
   if (interaction.isStringSelectMenu()) {
     const state = pending.get(interaction.user.id);
     if (!state) { await interaction.deferUpdate(); return; }
@@ -127,7 +161,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferUpdate();
   }
 
-  // ── Botão "Abrir formulário" ───────────────────────────────────────────────
+  // ── Botão "Abrir formulário" ────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
     if (!state?.resultado || !state?.acao || !state?.pilotoNome || state.atirador === undefined) {
@@ -139,7 +173,6 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (state.atirador) {
-      // Com atirador → modal 1 de 2 (Spots + Calls + Ângulos)
       const modal = new ModalBuilder().setCustomId('form_atirador_1').setTitle('Análise — Parte 1/2');
       modal.addComponents(
         new ActionRowBuilder().addComponents(
@@ -157,7 +190,6 @@ client.on('interactionCreate', async (interaction) => {
       );
       await interaction.showModal(modal);
     } else {
-      // Sem atirador → modal único com todos os 5 campos
       const modal = new ModalBuilder().setCustomId('form_completo').setTitle('Análise da Ação');
       modal.addComponents(
         new ActionRowBuilder().addComponents(
@@ -180,25 +212,25 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // ── Modal único (sem atirador) → gera direto ─────────────────────────────
+  // ── Modal único (sem atirador) ──────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_completo') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
-    if (!state) { await interaction.editReply({ content: '❌ Sessão expirada. Use `/relatorio` novamente.' }); return; }
+    if (!state) { await interaction.editReply({ content: '❌ Sessão expirada. Inicie uma nova avaliação.' }); return; }
     pending.delete(interaction.user.id);
 
     await gerarEPostar(interaction, {
       ...state,
-      data:          interaction.fields.getTextInputValue('data'),
-      spots:         interaction.fields.getTextInputValue('spots'),
-      calls:         interaction.fields.getTextInputValue('calls'),
-      melhorias:     interaction.fields.getTextInputValue('positivos'),
-      negativos:     interaction.fields.getTextInputValue('negativos'),
-      autor:         interaction.member.displayName,
+      data:      interaction.fields.getTextInputValue('data'),
+      spots:     interaction.fields.getTextInputValue('spots'),
+      calls:     interaction.fields.getTextInputValue('calls'),
+      melhorias: interaction.fields.getTextInputValue('positivos'),
+      negativos: interaction.fields.getTextInputValue('negativos'),
+      autor:     interaction.member.displayName,
     });
   }
 
-  // ── Modal com atirador parte 1 → salva e mostra botão para parte 2 ────────
+  // ── Modal com atirador parte 1 ──────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_1') {
     const state = pending.get(interaction.user.id) ?? {};
     state.data    = interaction.fields.getTextInputValue('data');
@@ -207,19 +239,16 @@ client.on('interactionCreate', async (interaction) => {
     state.angulos = interaction.fields.getTextInputValue('angulos');
     pending.set(interaction.user.id, state);
 
-    const btn = new ButtonBuilder()
-      .setCustomId('btn_parte2')
-      .setLabel('Continuar → Comportamento & Pontos')
-      .setStyle(ButtonStyle.Primary);
-
     await interaction.reply({
       content: '**Parte 1 salva!** Clique abaixo para preencher o restante.',
-      components: [new ActionRowBuilder().addComponents(btn)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('btn_parte2').setLabel('Continuar → Comportamento & Pontos').setStyle(ButtonStyle.Primary)
+      )],
       flags: MessageFlags.Ephemeral,
     });
   }
 
-  // ── Botão parte 2 → abre modal 2 ─────────────────────────────────────────
+  // ── Botão parte 2 ───────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_parte2') {
     const modal2 = new ModalBuilder().setCustomId('form_atirador_2').setTitle('Análise — Parte 2/2');
     modal2.addComponents(
@@ -236,11 +265,11 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.showModal(modal2);
   }
 
-  // ── Modal com atirador parte 2 → gera ────────────────────────────────────
+  // ── Modal com atirador parte 2 ──────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_2') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
-    if (!state) { await interaction.editReply({ content: '❌ Sessão expirada. Use `/relatorio` novamente.' }); return; }
+    if (!state) { await interaction.editReply({ content: '❌ Sessão expirada. Inicie uma nova avaliação.' }); return; }
     pending.delete(interaction.user.id);
 
     await gerarEPostar(interaction, {
@@ -252,7 +281,7 @@ client.on('interactionCreate', async (interaction) => {
     });
   }
 
-  // ── Botões de confirmação de DM ─────────────────────────────────────────
+  // ── Botões de confirmação de DM ─────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'dm_nao') {
     const dmData = pendingDM.get(interaction.user.id);
     pendingDM.delete(interaction.user.id);
@@ -288,7 +317,6 @@ client.on('interactionCreate', async (interaction) => {
 // ── Helper: gera imagem e posta no canal ──────────────────────────────────────
 async function gerarEPostar(interaction, dados) {
   try {
-    const { generateReportImage } = require('./generateImage');
     const imagePath = await generateReportImage(dados);
     const canal = client.channels.cache.get(dados.channelId);
     if (!canal) {
@@ -297,15 +325,12 @@ async function gerarEPostar(interaction, dados) {
     }
     await canal.send({ files: [imagePath] });
 
-    // Guarda imagem e pilotoId para possível DM
     if (dados.pilotoId) {
       pendingDM.set(interaction.user.id, { imagePath, pilotoId: dados.pilotoId, pilotoNome: dados.pilotoNome, acao: dados.acao, data: dados.data, autor: dados.autor });
       const btnSim = new ButtonBuilder().setCustomId('dm_sim').setLabel('✉️  Sim, enviar').setStyle(ButtonStyle.Success);
       const btnNao = new ButtonBuilder().setCustomId('dm_nao').setLabel('Não').setStyle(ButtonStyle.Secondary);
       await interaction.editReply({
-        content: `✅ Relatório postado!
-
-Deseja enviar o relatório por DM para **${dados.pilotoNome}**?`,
+        content: `✅ Relatório postado!\n\nDeseja enviar o relatório por DM para **${dados.pilotoNome}**?`,
         components: [new ActionRowBuilder().addComponents(btnSim, btnNao)],
       });
     } else {
