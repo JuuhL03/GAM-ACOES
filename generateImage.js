@@ -3,37 +3,32 @@ const path = require('path');
 const os   = require('os');
 const fs   = require('fs');
 
-const fontDir = path.join(__dirname, 'fonts');
+const fontDir     = path.join(__dirname, 'fonts');
 const fontRegular = path.join(fontDir, 'Roboto-Regular.ttf');
-const fontBold    = path.join(fontDir, 'Roboto-Bold.ttf');
+const fontBold    = path.join(fontDir, 'Roboto-Bold.woff2');
 
 async function ensureFonts() {
-  if (fs.existsSync(fontRegular) && fs.existsSync(fontBold)) {
+  if (fs.existsSync(fontRegular)) {
     GlobalFonts.registerFromPath(fontRegular, 'Roboto');
-    GlobalFonts.registerFromPath(fontBold,    'Roboto');
-    console.log('🔤 Fontes carregadas do disco.');
-    return;
+    console.log('🔤 Regular carregada:', fs.statSync(fontRegular).size, 'bytes');
+  } else {
+    console.log('❌ Roboto-Regular.ttf não encontrado');
   }
-  console.log('🔤 Baixando fontes Roboto...');
-  if (!fs.existsSync(fontDir)) fs.mkdirSync(fontDir);
-  const https = require('https');
-  const download = (url, dest) => new Promise((res, rej) => {
-    const file = fs.createWriteStream(dest);
-    https.get(url, r => { r.pipe(file); file.on('finish', () => { file.close(); res(); }); }).on('error', rej);
-  });
-  await download('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Regular.ttf', fontRegular);
-  await download('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf',    fontBold);
-  GlobalFonts.registerFromPath(fontRegular, 'Roboto');
-  GlobalFonts.registerFromPath(fontBold,    'Roboto');
-  console.log('🔤 Fontes baixadas e registradas.');
+  if (fs.existsSync(fontBold)) {
+    GlobalFonts.registerFromPath(fontBold, 'Roboto Bold');
+    console.log('🔤 Bold carregada:', fs.statSync(fontBold).size, 'bytes');
+  } else {
+    console.log('⚠️  Roboto-Bold.woff2 não encontrado, usando Regular no lugar');
+  }
 }
-const F = 'Roboto, Arial, sans-serif';
+
+const F     = 'Roboto, Arial, sans-serif';
+const F_B   = 'Roboto Bold, Roboto, Arial, sans-serif';
 
 const C = {
   bg:           '#0c0e14',
   headerBg:     '#0e1018',
   metaBg:       '#0e1018',
-  secBg:        '#111420',
   divider:      '#1e2433',
   topbar1:      '#00b4d8',
   topbar2:      '#90e0ef',
@@ -56,17 +51,12 @@ const C = {
   neutroBg:     '#071520',
 };
 
-// Resolução 2x para qualidade
 const SCALE  = 2;
 const W_CSS  = 860;
 const W      = W_CSS * SCALE;
 const PAD    = 32 * SCALE;
 const INNER  = W - PAD * 2;
 const LINE_H = 21 * SCALE;
-
-function scale(ctx) {
-  ctx.scale(SCALE, SCALE);
-}
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -116,40 +106,29 @@ function wrapText(ctx, text, maxWidth) {
   return lines.length ? lines : ['—'];
 }
 
-// Alturas em pixels no espaço escalado
 const S = {
-  topbar:    5  * SCALE,
-  header:    88 * SCALE,
-  divider:   1  * SCALE,
-  metaRow:   62 * SCALE,
-  secGap:    8  * SCALE,
-  footer:    40 * SCALE,
+  topbar:  5  * SCALE,
+  header:  88 * SCALE,
+  divider: 1  * SCALE,
+  metaRow: 62 * SCALE,
+  secGap:  8  * SCALE,
+  footer:  40 * SCALE,
 };
 
 function sectionH(lines) {
-  const labelH = 11 * SCALE;
-  const sepGap = 10 * SCALE;
-  const sepH   = 1  * SCALE;
-  const textGap= 10 * SCALE;
-  const padV   = 14 * SCALE;
-  return padV + labelH + sepGap + sepH + textGap + lines.length * LINE_H + padV;
+  return 14 * SCALE + 11 * SCALE + 10 * SCALE + 1 * SCALE + 10 * SCALE + lines.length * LINE_H + 14 * SCALE;
 }
 
 function fieldStyle(label) {
   const l = label.toUpperCase();
-  if (l.includes('NEGATIVO'))  return { bar: C.negativo, labelColor: C.negativo, bg: C.negativoBg };
-  if (l.includes('POSITIVO'))  return { bar: C.positivo, labelColor: C.positivo, bg: C.positivoBg };
+  if (l.includes('NEGATIVO')) return { bar: C.negativo, labelColor: C.negativo, bg: C.negativoBg };
+  if (l.includes('POSITIVO')) return { bar: C.positivo, labelColor: C.positivo, bg: C.positivoBg };
   return { bar: C.cyan, labelColor: C.cyan, bg: C.neutroBg };
 }
 
 async function generateReportImage(dados) {
   await ensureFonts();
-  console.log('🔤 Tamanho Regular:', fs.statSync(fontRegular).size, 'bytes');
-  console.log('🔤 Tamanho Bold:', fs.statSync(fontBold).size, 'bytes');
-  console.log('🔤 Font dir existe?', fs.existsSync(path.join(__dirname, 'fonts')));
-  console.log('🔤 Roboto-Regular existe?', fs.existsSync(path.join(__dirname, 'fonts', 'Roboto-Regular.ttf')));
-  console.log('🔤 campos com valor:', dados.spots, dados.calls, dados.melhorias, dados.negativos);
-  
+
   const campos = [
     { label: 'Spots',            valor: dados.spots },
     { label: 'Calls',            valor: dados.calls },
@@ -159,7 +138,6 @@ async function generateReportImage(dados) {
     { label: 'Pontos Negativos', valor: dados.negativos },
   ].filter(c => c.valor && c.valor.trim());
 
-  // Pré-calcular wraps no espaço escalado
   const tmp = createCanvas(W, 100);
   const tc  = tmp.getContext('2d');
   tc.font   = `${14 * SCALE}px ${F}`;
@@ -170,9 +148,7 @@ async function generateReportImage(dados) {
     return { ...c, lines, h: sectionH(lines), ...fieldStyle(c.label) };
   });
 
-  // Altura total
-  let totalH = S.topbar + S.header + S.divider + S.metaRow + S.divider;
-  totalH += S.secGap;
+  let totalH = S.topbar + S.header + S.divider + S.metaRow + S.divider + S.secGap;
   for (const s of secoes) totalH += s.h + S.secGap;
   if (!secoes.length) totalH += 50 * SCALE;
   totalH += S.divider + S.footer;
@@ -185,7 +161,7 @@ async function generateReportImage(dados) {
 
   let y = 0;
 
-  // Topbar
+  // ── Topbar ──
   const topGrad = ctx.createLinearGradient(0, 0, W, 0);
   topGrad.addColorStop(0, C.topbar1);
   topGrad.addColorStop(0.5, C.topbar2);
@@ -194,26 +170,23 @@ async function generateReportImage(dados) {
   ctx.fillRect(0, y, W, S.topbar);
   y += S.topbar;
 
-  // Header
+  // ── Header ──
   ctx.fillStyle = C.headerBg;
   ctx.fillRect(0, y, W, S.header);
 
-  // Logo no header (canto direito)
   let logoW_px = 0;
-  let logo = null;
   const logoPath = path.join(__dirname, 'logo.png');
   if (fs.existsSync(logoPath)) {
     try {
-      logo = await loadImage(logoPath);
-      const lh = 56 * SCALE;
-      logoW_px  = (logo.width / logo.height) * lh;
+      const logo = await loadImage(logoPath);
+      const lh   = 56 * SCALE;
+      logoW_px   = (logo.width / logo.height) * lh;
       ctx.drawImage(logo, W - PAD - logoW_px, y + (S.header - lh) / 2, logoW_px, lh);
     } catch (_) {}
   }
 
-  // Título
   ctx.fillStyle = C.white;
-  ctx.font = `bold ${22 * SCALE}px ${F}`;
+  ctx.font = `${22 * SCALE}px ${F_B}`;
   ctx.fillText('RELATÓRIO DE AÇÃO', PAD, y + 36 * SCALE);
 
   ctx.fillStyle = C.textDim;
@@ -221,12 +194,12 @@ async function generateReportImage(dados) {
   ctx.fillText(`Emitido por ${dados.autor}  ·  Sistema de Análise Tática GAM`, PAD, y + 58 * SCALE);
 
   // Badge resultado
-  const isVit = dados.resultado === 'Vitória';
+  const isVit  = dados.resultado === 'Vitória';
   const bColor = isVit ? C.vitoria : C.derrota;
   const bBg    = isVit ? C.vitoriaBg : C.derrotaBg;
   const bBord  = isVit ? C.vitoriaBord : C.derrotaBord;
   const bText  = (dados.resultado ?? '—').toUpperCase();
-  ctx.font = `bold ${12 * SCALE}px ${F}`;
+  ctx.font = `${12 * SCALE}px ${F_B}`;
   const bw = ctx.measureText(bText).width + 26 * SCALE;
   const bh = 28 * SCALE;
   const bx = W - PAD - logoW_px - (logoW_px > 0 ? 16 * SCALE : 0) - bw;
@@ -242,32 +215,31 @@ async function generateReportImage(dados) {
   ctx.fillText(bText, bx + 13 * SCALE, by + bh / 2 + 5 * SCALE);
   y += S.header;
 
-  // Divider
+  // ── Divider ──
   ctx.fillStyle = C.divider;
   ctx.fillRect(0, y, W, S.divider);
   y += S.divider;
 
-  // Meta row — 4 colunas: Data | Ação | Piloto | Analista
+  // ── Meta row ──
   ctx.fillStyle = C.metaBg;
   ctx.fillRect(0, y, W, S.metaRow);
 
   const metaCols = [
-    { label: 'DATA',     valor: dados.data        },
-    { label: 'AÇÃO',     valor: dados.acao         },
-    { label: 'PILOTO',   valor: dados.pilotoNome   },
-    { label: 'ANALISTA', valor: dados.autor        },
+    { label: 'DATA',     valor: dados.data      },
+    { label: 'AÇÃO',     valor: dados.acao       },
+    { label: 'PILOTO',   valor: dados.pilotoNome },
+    { label: 'ANALISTA', valor: dados.autor      },
   ];
   const colW = INNER / metaCols.length;
 
   metaCols.forEach((m, i) => {
-    const gap = 14 * SCALE;
-    const mx  = PAD + i * colW + (i > 0 ? gap : 0);
+    const mx = PAD + i * colW + (i > 0 ? 14 * SCALE : 0);
     if (i > 0) {
       ctx.fillStyle = C.divider;
       ctx.fillRect(PAD + i * colW - 1, y + 10 * SCALE, 1, S.metaRow - 20 * SCALE);
     }
     ctx.fillStyle = C.textMuted;
-    ctx.font = `bold ${9 * SCALE}px ${F}`;
+    ctx.font = `${9 * SCALE}px ${F_B}`;
     ctx.fillText(m.label, mx, y + 22 * SCALE);
 
     ctx.fillStyle = C.white;
@@ -277,12 +249,12 @@ async function generateReportImage(dados) {
 
   y += S.metaRow;
 
-  // Divider
+  // ── Divider ──
   ctx.fillStyle = C.divider;
   ctx.fillRect(0, y, W, S.divider);
   y += S.divider + S.secGap;
 
-  // Seções
+  // ── Seções ──
   if (!secoes.length) {
     ctx.fillStyle = C.textDim;
     ctx.font = `${13 * SCALE}px ${F}`;
@@ -291,24 +263,21 @@ async function generateReportImage(dados) {
   }
 
   for (const sec of secoes) {
-    const ix = PAD + 16 * SCALE;
+    const ix   = PAD + 16 * SCALE;
+    const padV = 14 * SCALE;
+
     ctx.fillStyle = sec.bg;
     roundRect(ctx, PAD, y, INNER, sec.h, 4 * SCALE);
     ctx.fill();
 
-    // Barra lateral
     ctx.fillStyle = sec.bar;
     roundRect(ctx, PAD, y, 3 * SCALE, sec.h, 2 * SCALE);
     ctx.fill();
 
-    const padV = 14 * SCALE;
-
-    // Label
     ctx.fillStyle = sec.labelColor;
-    ctx.font = `bold ${10 * SCALE}px ${F}`;
+    ctx.font = `${10 * SCALE}px ${F_B}`;
     ctx.fillText(sec.label.toUpperCase(), ix, y + padV + 11 * SCALE);
 
-    // Separador
     const sepY = y + padV + 11 * SCALE + 10 * SCALE;
     ctx.strokeStyle = sec.bar + '33';
     ctx.lineWidth = 1 * SCALE;
@@ -317,7 +286,6 @@ async function generateReportImage(dados) {
     ctx.lineTo(PAD + INNER - 14 * SCALE, sepY);
     ctx.stroke();
 
-    // Texto
     ctx.fillStyle = C.text;
     ctx.font = `${14 * SCALE}px ${F}`;
     const textStartY = sepY + 10 * SCALE;
@@ -328,7 +296,7 @@ async function generateReportImage(dados) {
     y += sec.h + S.secGap;
   }
 
-  // Footer
+  // ── Footer ──
   ctx.fillStyle = C.divider;
   ctx.fillRect(0, y, W, S.divider);
   y += S.divider;
