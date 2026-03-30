@@ -4,9 +4,28 @@ const os   = require('os');
 const fs   = require('fs');
 
 const fontDir = path.join(__dirname, 'fonts');
-if (fs.existsSync(path.join(fontDir, 'Roboto-Regular.ttf'))) {
-  GlobalFonts.registerFromPath(path.join(fontDir, 'Roboto-Regular.ttf'), 'Roboto');
-  GlobalFonts.registerFromPath(path.join(fontDir, 'Roboto-Bold.ttf'),    'Roboto');
+const fontRegular = path.join(fontDir, 'Roboto-Regular.ttf');
+const fontBold    = path.join(fontDir, 'Roboto-Bold.ttf');
+
+async function ensureFonts() {
+  if (fs.existsSync(fontRegular) && fs.existsSync(fontBold)) {
+    GlobalFonts.registerFromPath(fontRegular, 'Roboto');
+    GlobalFonts.registerFromPath(fontBold,    'Roboto');
+    console.log('🔤 Fontes carregadas do disco.');
+    return;
+  }
+  console.log('🔤 Baixando fontes Roboto...');
+  if (!fs.existsSync(fontDir)) fs.mkdirSync(fontDir);
+  const https = require('https');
+  const download = (url, dest) => new Promise((res, rej) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, r => { r.pipe(file); file.on('finish', () => { file.close(); res(); }); }).on('error', rej);
+  });
+  await download('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Regular.ttf', fontRegular);
+  await download('https://github.com/googlefonts/roboto/raw/main/src/hinted/Roboto-Bold.ttf',    fontBold);
+  GlobalFonts.registerFromPath(fontRegular, 'Roboto');
+  GlobalFonts.registerFromPath(fontBold,    'Roboto');
+  console.log('🔤 Fontes baixadas e registradas.');
 }
 const F = 'Roboto, Arial, sans-serif';
 
@@ -124,7 +143,7 @@ function fieldStyle(label) {
 }
 
 async function generateReportImage(dados) {
-
+  await ensureFonts();
   console.log('🔤 Font dir existe?', fs.existsSync(path.join(__dirname, 'fonts')));
   console.log('🔤 Roboto-Regular existe?', fs.existsSync(path.join(__dirname, 'fonts', 'Roboto-Regular.ttf')));
   console.log('🔤 campos com valor:', dados.spots, dados.calls, dados.melhorias, dados.negativos);
