@@ -411,6 +411,7 @@ async function finalizarThread(dmData) {
 // ── Helper: gera imagem e posta no canal ──────────────────────────────────────
 async function gerarEPostar(interaction, dados) {
   try {
+    console.log('📦 dados:', JSON.stringify(dados, null, 2));
     const imagePath = await generateReportImage(dados);
     const canal     = client.channels.cache.get(dados.channelId);
 
