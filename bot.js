@@ -40,27 +40,6 @@ client.once('ready', async () => {
       console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message);
     }
   }
-
-  // ── Mensagem fixa de avaliação ────────────────────────────────────────────
-  if (process.env.SETUP_CHANNEL_ID) {
-    try {
-      const canal = await client.channels.fetch(process.env.SETUP_CHANNEL_ID);
-
-      const botao = new ButtonBuilder()
-        .setCustomId('iniciar_avaliacao')
-        .setLabel('📋  Iniciar Avaliação')
-        .setStyle(ButtonStyle.Primary);
-
-      await canal.send({
-        content: '## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.',
-        components: [new ActionRowBuilder().addComponents(botao)],
-      });
-
-      console.log('✅ Mensagem de avaliação postada no canal de setup.');
-    } catch (err) {
-      console.error('❌ Erro ao postar mensagem de setup:', err.message);
-    }
-  }
 });
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
