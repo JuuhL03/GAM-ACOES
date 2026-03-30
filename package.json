@@ -1,0 +1,20 @@
+{
+  "name": "discord-relatorio-bot",
+  "version": "1.0.0",
+  "description": "Bot Discord para geração de relatórios de ação em imagem",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "deploy": "node deploy.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.97",
+    "@napi-rs/canvas": "^0.1.53",
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
