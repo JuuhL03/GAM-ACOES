@@ -12,7 +12,8 @@ const {
   MessageFlags,
 } = require('discord.js');
 const { generateReportImage } = require('./generateImage');
-const fs = require('fs');
+const fs   = require('fs');
+const path = require('path');
 
 const client = new Client({
   intents: [
@@ -23,9 +24,31 @@ const client = new Client({
   ],
 });
 
-const pending         = new Map(); // estado do formulário por usuário
-const pendingDM       = new Map(); // aguardando confirmação de DM
+const pending         = new Map();
+const pendingDM       = new Map();
 const threadSetupMsgs = new Map(); // threadId → { setupMsgId, originalMsgId }
+
+const JSON_PATH = path.join(__dirname, 'pendingThreads.json');
+
+function loadThreads() {
+  if (fs.existsSync(JSON_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(JSON_PATH, 'utf8'));
+      for (const [threadId, val] of Object.entries(data)) {
+        threadSetupMsgs.set(threadId, val);
+      }
+      console.log(`📂 ${Object.keys(data).length} thread(s) pendente(s) carregada(s).`);
+    } catch (e) {
+      console.warn('⚠️  Erro ao carregar pendingThreads.json:', e.message);
+    }
+  }
+}
+
+function saveThreads() {
+  const obj = {};
+  for (const [k, v] of threadSetupMsgs.entries()) obj[k] = v;
+  fs.writeFileSync(JSON_PATH, JSON.stringify(obj, null, 2));
+}
 
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -33,12 +56,13 @@ const ACOES = [
   'Carro Forte Açougue', 'Carro Forte Groove', 'Carro Forte Faculdade',
 ];
 
-const URL_REGEX   = /https?:\/\/\S+/i;
-const CHECK_EMOJI = '<:right:1330606335988990045>';
+const URL_REGEX = /https?:\/\/\S+/i;
 
 // ── Ready ──────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
+
+  loadThreads();
 
   const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
   if (mainGuild) {
@@ -78,29 +102,27 @@ client.on('messageCreate', async (message) => {
       components: [new ActionRowBuilder().addComponents(botao)],
     });
 
-    // salva setupMsgId e originalMsgId para limpeza e reação posterior
     threadSetupMsgs.set(thread.id, {
       setupMsgId:    setupMsg.id,
       originalMsgId: message.id,
     });
+    saveThreads();
 
     console.log(`✅ Thread criada para ${message.member?.displayName}`);
 
-    // ── DM para todos com ALLOWED_ROLE_ID ─────────────────────────────────
+    // DM para avaliadores
     const guild       = message.guild;
     const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
-
     if (allowedRole) {
       const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
       const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${message.member?.displayName ?? message.author.username}\n**Acesse a thread:** ${threadLink}`;
-
       for (const [, member] of allowedRole.members) {
         if (member.user.bot) continue;
         try {
           await member.send(dmTexto);
           console.log(`✉️  DM enviada para ${member.displayName}`);
         } catch {
-          console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName} (DMs fechadas)`);
+          console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName}`);
         }
       }
     }
@@ -184,13 +206,11 @@ async function abrirSelects(interaction) {
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // /relatorio
   if (interaction.isChatInputCommand() && interaction.commandName === 'relatorio') {
     await abrirSelects(interaction);
     return;
   }
 
-  // Botão fixo dentro da thread
   if (interaction.isButton() && interaction.customId === 'iniciar_avaliacao') {
     await abrirSelects(interaction);
     return;
@@ -378,27 +398,26 @@ client.on('interactionCreate', async (interaction) => {
 
 });
 
-// ── Helper: apaga msg de avaliação da thread + reação na msg original ──────────
+// ── Helper: apaga msg da thread + reação na msg original ──────────────────────
 async function finalizarThread(dmData) {
   if (!dmData) return;
 
-  // apaga mensagem de avaliação da thread
   if (dmData.setupMsgId && dmData.channelId) {
     try {
       const thread   = await client.channels.fetch(dmData.channelId);
       const setupMsg = await thread.messages.fetch(dmData.setupMsgId);
       await setupMsg.delete();
       threadSetupMsgs.delete(dmData.channelId);
+      saveThreads();
       console.log('🧹 Mensagem de avaliação removida da thread.');
     } catch (err) {
       console.warn('⚠️  Não foi possível apagar mensagem da thread:', err.message);
     }
   }
 
-  // reação ✅ na mensagem original do canal
   if (dmData.originalMsgId) {
     try {
-      const canal      = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
+      const canal       = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
       const originalMsg = await canal.messages.fetch(dmData.originalMsgId);
       await originalMsg.react('1330606335988990045');
       console.log('✅ Reação adicionada na mensagem original.');
@@ -411,7 +430,6 @@ async function finalizarThread(dmData) {
 // ── Helper: gera imagem e posta no canal ──────────────────────────────────────
 async function gerarEPostar(interaction, dados) {
   try {
-    console.log('📦 dados:', JSON.stringify(dados, null, 2));
     const imagePath = await generateReportImage(dados);
     const canal     = client.channels.cache.get(dados.channelId);
 
