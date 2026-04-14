@@ -27,29 +27,46 @@ const client = new Client({
 const pending         = new Map();
 const pendingDM       = new Map();
 const threadSetupMsgs = new Map(); // threadId → { setupMsgId, originalMsgId }
+const pendencias      = new Map(); // id → { piloto, acao, resultado, timestamp, messageId, messageUrl }
 
-const JSON_PATH = path.join(__dirname, 'pendingThreads.json');
+const THREADS_PATH    = path.join(__dirname, 'pendingThreads.json');
+const PENDENCIAS_PATH = path.join(__dirname, 'pendencias.json');
 
+// ── Persistência: threads ─────────────────────────────────────────────────────
 function loadThreads() {
-  if (fs.existsSync(JSON_PATH)) {
+  if (fs.existsSync(THREADS_PATH)) {
     try {
-      const data = JSON.parse(fs.readFileSync(JSON_PATH, 'utf8'));
-      for (const [threadId, val] of Object.entries(data)) {
-        threadSetupMsgs.set(threadId, val);
-      }
-      console.log(`📂 ${Object.keys(data).length} thread(s) pendente(s) carregada(s).`);
-    } catch (e) {
-      console.warn('⚠️  Erro ao carregar pendingThreads.json:', e.message);
-    }
+      const data = JSON.parse(fs.readFileSync(THREADS_PATH, 'utf8'));
+      for (const [k, v] of Object.entries(data)) threadSetupMsgs.set(k, v);
+      console.log(`📂 ${Object.keys(data).length} thread(s) carregada(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar pendingThreads.json:', e.message); }
   }
 }
 
 function saveThreads() {
   const obj = {};
   for (const [k, v] of threadSetupMsgs.entries()) obj[k] = v;
-  fs.writeFileSync(JSON_PATH, JSON.stringify(obj, null, 2));
+  fs.writeFileSync(THREADS_PATH, JSON.stringify(obj, null, 2));
 }
 
+// ── Persistência: pendências ──────────────────────────────────────────────────
+function loadPendencias() {
+  if (fs.existsSync(PENDENCIAS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(PENDENCIAS_PATH, 'utf8'));
+      for (const [k, v] of Object.entries(data)) pendencias.set(k, v);
+      console.log(`📋 ${pendencias.size} pendência(s) carregada(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar pendencias.json:', e.message); }
+  }
+}
+
+function savePendencias() {
+  const obj = {};
+  for (const [k, v] of pendencias.entries()) obj[k] = v;
+  fs.writeFileSync(PENDENCIAS_PATH, JSON.stringify(obj, null, 2));
+}
+
+// ── Lista de ações ────────────────────────────────────────────────────────────
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
   'Banco Central', 'Banco de Paleto', 'Nióbio Humane', 'Joalheria',
@@ -58,28 +75,125 @@ const ACOES = [
 
 const URL_REGEX = /https?:\/\/\S+/i;
 
-// ── Ready ──────────────────────────────────────────────────────────────────────
+// ── Dice coefficient ──────────────────────────────────────────────────────────
+function bigrams(str) {
+  const s = (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const set = new Set();
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+  return set;
+}
+
+function dice(a, b) {
+  if (!a || !b) return 0;
+  const ba = bigrams(a), bb = bigrams(b);
+  if (!ba.size || !bb.size) return 0;
+  let inter = 0;
+  for (const bg of ba) if (bb.has(bg)) inter++;
+  return (2 * inter) / (ba.size + bb.size);
+}
+
+function normalizar(str) {
+  return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+
+// ── Parser do embed de pendência ──────────────────────────────────────────────
+function parseEmbedPendencia(message) {
+  const embed = message.embeds?.[0];
+  let acao = null, piloto = null, resultado = null, id = null;
+
+  if (embed) {
+    acao      = embed.title?.trim() ?? null;
+    resultado = embed.fields?.find(f => normalizar(f.name).includes('resultado'))?.value?.trim() ?? null;
+    id        = embed.footer?.text?.replace(/^id[:\s]*/i, '').trim() ?? message.id;
+
+    const pilotoField = embed.fields?.find(f => normalizar(f.name).includes('piloto'));
+    if (pilotoField) piloto = pilotoField.value.replace(/^@#\d+\s*/, '').trim();
+  } else if (message.content) {
+    const lines = message.content.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (/^piloto[:\s]/i.test(line))    piloto    = line.replace(/^piloto[:\s]*/i, '').replace(/^@#\d+\s*/, '').trim();
+      if (/^resultado[:\s]/i.test(line)) resultado = line.replace(/^resultado[:\s]*/i, '').trim();
+      if (/^id[:\s]/i.test(line))        id        = line.replace(/^id[:\s]*/i, '').trim();
+    }
+    if (!acao && lines.length > 0 && !lines[0].includes(':')) acao = lines[0];
+    if (!id) id = message.id;
+  }
+
+  if (!piloto && !acao) return null;
+  return { piloto, acao, resultado, id: id ?? message.id };
+}
+
+// ── Matching: vídeo chegou → tenta resolver pendência ────────────────────────
+const MATCH_THRESHOLD     = 0.38;
+const DATA_TOLERANCE_DIAS = 7;
+
+function tentarResolverPendencia(pilotoNome, timestampVideo) {
+  let melhorId = null, melhorScore = 0, melhorData = null;
+
+  for (const [id, p] of pendencias.entries()) {
+    const diffDias = Math.abs(new Date(p.timestamp) - timestampVideo) / (1000 * 60 * 60 * 24);
+    if (diffDias > DATA_TOLERANCE_DIAS) continue;
+
+    const scoreData    = 1 - diffDias / DATA_TOLERANCE_DIAS;
+    const primeiroNome = normalizar(p.piloto ?? '').split(' ')[0];
+    const scorePiloto  = Math.max(
+      dice(p.piloto ?? '', pilotoNome),
+      normalizar(pilotoNome).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
+    );
+    const total = scorePiloto * 0.75 + scoreData * 0.25;
+
+    if (total > melhorScore) { melhorScore = total; melhorId = id; melhorData = p; }
+  }
+
+  if (melhorId && melhorScore >= MATCH_THRESHOLD) {
+    pendencias.delete(melhorId);
+    savePendencias();
+    return { score: melhorScore, ...melhorData };
+  }
+  return null;
+}
+
+// ── Ready ─────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
-
   loadThreads();
+  loadPendencias();
 
   const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
   if (mainGuild) {
     try {
       await mainGuild.members.fetch();
       console.log(`✅ Cache carregado: ${mainGuild.name}`);
-    } catch (e) {
-      console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message);
-    }
+    } catch (e) { console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message); }
   }
 });
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
 
-// ── Auto-thread ao postar link ou arquivo ──────────────────────────────────────
+// ── Mensagens ─────────────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  // ── Canal de pendências: registra embed como pendência ───────────────────
+  if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
+    const parsed = parseEmbedPendencia(message);
+    if (!parsed) return;
+
+    pendencias.set(parsed.id, {
+      piloto:     parsed.piloto,
+      acao:       parsed.acao,
+      resultado:  parsed.resultado,
+      timestamp:  message.createdAt.toISOString(),
+      messageId:  message.id,
+      messageUrl: message.url,
+    });
+    savePendencias();
+    console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (total: ${pendencias.size})`);
+    return;
+  }
+
+  // ── Canal de ações: cria thread + tenta resolver pendência ───────────────
   if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
 
   const temLink    = URL_REGEX.test(message.content);
@@ -87,8 +201,17 @@ client.on('messageCreate', async (message) => {
   if (!temLink && !temArquivo) return;
 
   try {
+    const pilotoNome = message.member?.displayName ?? message.author.username;
+
+    // Tenta fazer matching com pendências antes de criar a thread
+    const resolvida = tentarResolverPendencia(pilotoNome, message.createdAt);
+    if (resolvida) {
+      const pct = Math.round(resolvida.score * 100);
+      console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${pct}%)`);
+    }
+
     const thread = await message.startThread({
-      name: `Avaliação — ${message.member?.displayName ?? message.author.username}`,
+      name: `Avaliação — ${pilotoNome}`,
       autoArchiveDuration: 1440,
     });
 
@@ -97,38 +220,42 @@ client.on('messageCreate', async (message) => {
       .setLabel('📋  Iniciar Avaliação')
       .setStyle(ButtonStyle.Primary);
 
+    // Mensagem de setup varia se havia pendência correspondente
+    const conteudoSetup = resolvida
+      ? (
+        `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.\n\n` +
+        `✅ **Pendência de envio resolvida!**\n` +
+        `> **Ação:** ${resolvida.acao ?? '—'} | **Resultado:** ${resolvida.resultado ?? '—'}\n` +
+        `> 🔗 [Ver no canal de pendências](${resolvida.messageUrl})`
+      )
+      : `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.`;
+
     const setupMsg = await thread.send({
-      content: '## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.',
+      content: conteudoSetup,
       components: [new ActionRowBuilder().addComponents(botao)],
     });
 
-    threadSetupMsgs.set(thread.id, {
-      setupMsgId:    setupMsg.id,
-      originalMsgId: message.id,
-    });
+    threadSetupMsgs.set(thread.id, { setupMsgId: setupMsg.id, originalMsgId: message.id });
     saveThreads();
-
-    console.log(`✅ Thread criada para ${message.member?.displayName}`);
+    console.log(`✅ Thread criada para ${pilotoNome}`);
 
     // DM para avaliadores
     const guild       = message.guild;
     const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
     if (allowedRole) {
       const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
-      const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${message.member?.displayName ?? message.author.username}\n**Acesse a thread:** ${threadLink}`;
+      const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${pilotoNome}\n**Acesse a thread:** ${threadLink}`;
       for (const [, member] of allowedRole.members) {
         if (member.user.bot) continue;
         try {
           await member.send(dmTexto);
           console.log(`✉️  DM enviada para ${member.displayName}`);
-        } catch {
-          console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName}`);
-        }
+        } catch { console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName}`); }
       }
     }
 
   } catch (err) {
-    console.error('❌ Erro ao criar thread:', err.message);
+    console.error('❌ Erro ao processar mensagem:', err.message);
   }
 });
 
@@ -142,6 +269,35 @@ async function abrirSelects(interaction) {
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  // Recupera dados da thread do cache ou dinamicamente pós-restart
+  let threadData = threadSetupMsgs.get(interaction.channelId);
+
+  if (!threadData) {
+    console.log('⚠️  Dados não encontrados no cache, buscando na thread...');
+    try {
+      const thread        = interaction.channel;
+      const starterMsg    = await thread.fetchStarterMessage().catch(() => null);
+      const originalMsgId = starterMsg?.id ?? null;
+
+      const msgs     = await thread.messages.fetch({ limit: 20 });
+      const setupMsg = msgs.find(m =>
+        m.author.id === client.user.id &&
+        m.components?.length > 0 &&
+        m.components[0]?.components?.[0]?.customId === 'iniciar_avaliacao'
+      );
+      const setupMsgId = setupMsg?.id ?? null;
+
+      if (originalMsgId || setupMsgId) {
+        threadData = { setupMsgId, originalMsgId };
+        threadSetupMsgs.set(interaction.channelId, threadData);
+        saveThreads();
+        console.log(`♻️  Dados recuperados: setupMsgId=${setupMsgId}, originalMsgId=${originalMsgId}`);
+      }
+    } catch (err) {
+      console.warn('⚠️  Não foi possível recuperar dados da thread:', err.message);
+    }
+  }
+
   const role    = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
   const pilotos = role
     ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
@@ -151,8 +307,6 @@ async function abrirSelects(interaction) {
     await interaction.editReply({ content: '❌ Nenhum membro com o cargo configurado. Verifique `PILOT_ROLE_ID`.' });
     return;
   }
-
-  const threadData = threadSetupMsgs.get(interaction.channelId);
 
   pending.set(interaction.user.id, {
     channelId:     interaction.channelId,
@@ -206,21 +360,69 @@ async function abrirSelects(interaction) {
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  if (interaction.isChatInputCommand() && interaction.commandName === 'relatorio') {
-    await abrirSelects(interaction);
+  // ── /verificar ────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'verificar') {
+
+    // Checa cargo no servidor, mesmo que o comando venha de DM
+    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+
+    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+      await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.reply({ content: '📬 Verificando pendências...', flags: MessageFlags.Ephemeral });
+
+    try {
+      if (pendencias.size === 0) {
+        await interaction.user.send('✅ **Nenhuma pendência em aberto!** Todos os pilotos enviaram seus vídeos.');
+        return;
+      }
+
+      // Ordena por data, mais antigas primeiro
+      const lista = [...pendencias.entries()]
+        .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
+
+      const linhas = [`📋 **Pendências em aberto — ${lista.length} ação(ões)**\n`];
+
+      for (const [, p] of lista) {
+        const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        linhas.push(
+          `> **Piloto:** ${p.piloto ?? '—'}\n` +
+          `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
+          `> **Registrado em:** ${data} | 🔗 [Ver envio](${p.messageUrl})\n`
+        );
+      }
+
+      // Envia por DM, dividindo se passar de 1900 chars
+      let buffer = '';
+      for (const linha of linhas) {
+        if ((buffer + linha).length > 1900) {
+          await interaction.user.send(buffer);
+          buffer = '';
+        }
+        buffer += linha + '\n';
+      }
+      if (buffer.trim()) await interaction.user.send(buffer);
+
+    } catch (err) {
+      console.error('❌ Erro ao enviar DM de /verificar:', err.message);
+      await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
+    }
     return;
   }
 
+  // ── Botão iniciar avaliação ───────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'iniciar_avaliacao') {
     await abrirSelects(interaction);
     return;
   }
 
-  // ── Selects ──────────────────────────────────────────────────────────────────
+  // ── Selects ──────────────────────────────────────────────────────────────
   if (interaction.isStringSelectMenu()) {
     const state = pending.get(interaction.user.id);
     if (!state) { await interaction.deferUpdate(); return; }
-
     if (interaction.customId === 'sel_resultado') state.resultado = interaction.values[0];
     if (interaction.customId === 'sel_acao')      state.acao      = interaction.values[0];
     if (interaction.customId === 'sel_atirador')  state.atirador  = interaction.values[0] === 'sim';
@@ -234,7 +436,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Botão "Abrir formulário" ──────────────────────────────────────────────────
+  // ── Botão "Abrir formulário" ──────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
     if (!state?.resultado || !state?.acao || !state?.pilotoNome || state.atirador === undefined) {
@@ -286,7 +488,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Modal único (sem atirador) ────────────────────────────────────────────────
+  // ── Modal completo (sem atirador) ─────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_completo') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
@@ -305,7 +507,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Modal atirador parte 1 ────────────────────────────────────────────────────
+  // ── Modal atirador parte 1 ────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_1') {
     const state = pending.get(interaction.user.id) ?? {};
     state.data    = interaction.fields.getTextInputValue('data');
@@ -324,7 +526,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Botão parte 2 ─────────────────────────────────────────────────────────────
+  // ── Botão parte 2 ─────────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_parte2') {
     const modal2 = new ModalBuilder().setCustomId('form_atirador_2').setTitle('Análise — Parte 2/2');
     modal2.addComponents(
@@ -342,7 +544,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Modal atirador parte 2 ────────────────────────────────────────────────────
+  // ── Modal atirador parte 2 ────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_2') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
@@ -359,7 +561,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Botão DM — Não ───────────────────────────────────────────────────────────
+  // ── Botão DM — Não ───────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'dm_nao') {
     const dmData = pendingDM.get(interaction.user.id);
     pendingDM.delete(interaction.user.id);
@@ -369,7 +571,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Botão DM — Sim ───────────────────────────────────────────────────────────
+  // ── Botão DM — Sim ───────────────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'dm_sim') {
     const dmData = pendingDM.get(interaction.user.id);
     pendingDM.delete(interaction.user.id);
@@ -395,7 +597,6 @@ client.on('interactionCreate', async (interaction) => {
     await finalizarThread(dmData);
     return;
   }
-
 });
 
 // ── Helper: apaga msg da thread + reação na msg original ──────────────────────
