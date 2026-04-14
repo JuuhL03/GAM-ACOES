@@ -124,6 +124,74 @@ function parseEmbedPendencia(message) {
   return { piloto, acao, resultado, id: id ?? message.id };
 }
 
+// ── Helper: encontra membro pelo nome do embed ────────────────────────────────
+function encontrarMembro(guild, nomePiloto) {
+  if (!nomePiloto) return null;
+  const primeiroNome = normalizar(nomePiloto).split(' ')[0];
+  if (primeiroNome.length < 2) return null;
+
+  // Tenta match exato primeiro, depois por contains
+  return guild.members.cache.find(m =>
+    normalizar(m.displayName) === normalizar(nomePiloto)
+  ) ?? guild.members.cache.find(m =>
+    normalizar(m.displayName).includes(primeiroNome)
+  ) ?? null;
+}
+
+// ── Helper: registra pendência (valida cargo e mês) ───────────────────────────
+// Regras:
+//   - Piloto deve ter PILOT_ROLE_ID → entra como pendência
+//   - Piloto tem ALLOWED_ROLE_ID (avaliador) → isento, ignora
+//   - Piloto não tem nenhum dos dois → ignora
+//   - Só considera mensagens do mês/ano atual
+async function registrarPendencia(msg) {
+  const parsed = parseEmbedPendencia(msg);
+  if (!parsed) return false;
+
+  // Só o mês atual
+  const agora   = new Date();
+  const msgData = new Date(msg.createdAt);
+  if (msgData.getMonth() !== agora.getMonth() || msgData.getFullYear() !== agora.getFullYear()) return false;
+
+  // Não duplica
+  if (pendencias.has(parsed.id)) return false;
+
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (guild) {
+    const membro = encontrarMembro(guild, parsed.piloto);
+
+    if (!membro) {
+      console.log(`⏭️  Piloto não encontrado no servidor, ignorando: ${parsed.piloto}`);
+      return false;
+    }
+
+    const temPiloto    = membro.roles.cache.has(process.env.PILOT_ROLE_ID);
+    const temAvaliador = membro.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+
+    if (temAvaliador) {
+      console.log(`⏭️  Avaliador isento, ignorando: ${parsed.piloto}`);
+      return false;
+    }
+
+    if (!temPiloto) {
+      console.log(`⏭️  Sem cargo de piloto, ignorando: ${parsed.piloto}`);
+      return false;
+    }
+  }
+
+  pendencias.set(parsed.id, {
+    piloto:     parsed.piloto,
+    acao:       parsed.acao,
+    resultado:  parsed.resultado,
+    timestamp:  msg.createdAt.toISOString(),
+    messageId:  msg.id,
+    messageUrl: msg.url,
+  });
+  savePendencias();
+  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (total: ${pendencias.size})`);
+  return true;
+}
+
 // ── Matching: vídeo chegou → tenta resolver pendência ────────────────────────
 const MATCH_THRESHOLD     = 0.38;
 const DATA_TOLERANCE_DIAS = 7;
@@ -178,19 +246,7 @@ client.on('messageCreate', async (message) => {
 
   // ── Canal de pendências: registra embed como pendência ───────────────────
   if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
-    const parsed = parseEmbedPendencia(message);
-    if (!parsed) return;
-
-    pendencias.set(parsed.id, {
-      piloto:     parsed.piloto,
-      acao:       parsed.acao,
-      resultado:  parsed.resultado,
-      timestamp:  message.createdAt.toISOString(),
-      messageId:  message.id,
-      messageUrl: message.url,
-    });
-    savePendencias();
-    console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (total: ${pendencias.size})`);
+    await registrarPendencia(message);
     return;
   }
 
@@ -204,7 +260,6 @@ client.on('messageCreate', async (message) => {
   try {
     const pilotoNome = message.member?.displayName ?? message.author.username;
 
-    // Tenta fazer matching com pendências antes de criar a thread
     const resolvida = tentarResolverPendencia(pilotoNome, message.createdAt);
     if (resolvida) {
       const pct = Math.round(resolvida.score * 100);
@@ -221,7 +276,6 @@ client.on('messageCreate', async (message) => {
       .setLabel('📋  Iniciar Avaliação')
       .setStyle(ButtonStyle.Primary);
 
-    // Mensagem de setup varia se havia pendência correspondente
     const conteudoSetup = resolvida
       ? (
         `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.\n\n` +
@@ -240,7 +294,6 @@ client.on('messageCreate', async (message) => {
     saveThreads();
     console.log(`✅ Thread criada para ${pilotoNome}`);
 
-    // DM para avaliadores
     const guild       = message.guild;
     const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
     if (allowedRole) {
@@ -361,8 +414,8 @@ async function abrirSelects(interaction) {
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // ── /verificar ────────────────────────────────────────────────────────────
-  if (interaction.isChatInputCommand() && interaction.commandName === 'verificar') {
+  // ── /pendencias: importa histórico + lista pendências em aberto ───────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
 
     // Checa cargo no servidor, mesmo que o comando venha de DM
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
@@ -373,19 +426,38 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    await interaction.reply({ content: '📬 Verificando pendências...', flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
+      // ── Importa histórico do canal de pendências ────────────────────────
+      let importados = 0;
+      if (process.env.PENDENCIAS_CHANNEL_ID) {
+        const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
+        const msgs  = await canal.messages.fetch({ limit: 100 });
+
+        for (const [, msg] of msgs) {
+          if (!msg.author.bot) continue;
+          const registrado = await registrarPendencia(msg);
+          if (registrado) importados++;
+        }
+      }
+
+      // ── Monta lista de pendências ────────────────────────────────────────
       if (pendencias.size === 0) {
-        await interaction.user.send('✅ **Nenhuma pendência em aberto!** Todos os pilotos enviaram seus vídeos.');
+        await interaction.user.send(
+          `✅ **Nenhuma pendência em aberto!**\n` +
+          (importados > 0 ? `_(${importados} importada(s) do histórico, todas já resolvidas ou isentas)_` : '')
+        );
         return;
       }
 
-      // Ordena por data, mais antigas primeiro
       const lista = [...pendencias.entries()]
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
-      const linhas = [`📋 **Pendências em aberto — ${lista.length} ação(ões)**\n`];
+      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões)**` +
+        (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
+
+      const linhas = [cabecalho];
 
       for (const [, p] of lista) {
         const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -408,7 +480,7 @@ client.on('interactionCreate', async (interaction) => {
       if (buffer.trim()) await interaction.user.send(buffer);
 
     } catch (err) {
-      console.error('❌ Erro ao enviar DM de /verificar:', err.message);
+      console.error('❌ Erro em /pendencias:', err.message);
       await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
     }
     return;
@@ -599,42 +671,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Importar: varre as ultimas mensagens para o /verificar ──────────────────────────────────────
-  if (interaction.isChatInputCommand() && interaction.commandName === 'importar') {
-    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
-    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
-      await interaction.reply({ content: '❌ Sem permissão.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
-    const msgs  = await canal.messages.fetch({ limit: 100 });
-    let count   = 0;
-
-    for (const [, msg] of msgs) {
-      if (!msg.author.bot) continue; // só embeds do outro bot
-      const parsed = parseEmbedPendencia(msg);
-      if (!parsed) continue;
-      if (pendencias.has(parsed.id)) continue; // não duplica
-
-      pendencias.set(parsed.id, {
-        piloto:     parsed.piloto,
-        acao:       parsed.acao,
-        resultado:  parsed.resultado,
-        timestamp:  msg.createdAt.toISOString(),
-        messageId:  msg.id,
-        messageUrl: msg.url,
-      });
-      count++;
-    }
-
-    savePendencias();
-    await interaction.editReply({ content: `✅ ${count} pendência(s) importada(s). Total: ${pendencias.size}` });
-    return;
-  }
 });
 
 // ── Helper: apaga msg da thread + reação na msg original ──────────────────────

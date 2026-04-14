@@ -6,13 +6,8 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('verificar')
-    .setDescription('Lista as pendências de envio de vídeo em aberto (enviado por DM)')
-    .toJSON(),
-
-  new SlashCommandBuilder()
-    .setName('importar')
-    .setDescription('Importa pendências antigas do canal de pendências')
+    .setName('pendencias')
+    .setDescription('Importa e lista as pendências de envio de vídeo do mês atual (enviado por DM)')
     .toJSON(),
 ];
 
