@@ -4,25 +4,14 @@ const { Client, GatewayIntentBits } = require('discord.js');
 // ── IDs das mensagens ORIGINAIS (do canal principal) ──────────────────────────
 // O script vai achar a thread de cada uma e apagar as mensagens do bot lá dentro
 const ORIGINAL_MSG_IDS = [
-  ''
+  '1492693680077672469'
 ];
 
 // ── IDs específicos de mensagens pra apagar dentro das threads (opcional) ─────
 // Se quiser apagar mensagens específicas pelo ID, coloca aqui.
 // Se deixar vazio [], o script apaga TODAS as mensagens do bot em cada thread.
 const MSG_IDS_ESPECIFICOS = [
-  '1493705997598855399',
-  '1493702212986081363',
-  '1493702750842654820',
-  '1493703739851145359',
-  '1493705999666643275',
-  '1493706005161185384',
-  '1493706012870574101',
-  '1493706013738799326',
-  '1493706014556426242',
-  '1493706015860854996',
-  '1493706036526190823',
-  '1493706043119632536'
+  '1492693682388996146'
 ];
 // ─────────────────────────────────────────────────────────────────────────────
 

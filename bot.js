@@ -26,13 +26,15 @@ const client = new Client({
 
 const pending         = new Map();
 const pendingDM       = new Map();
-const threadSetupMsgs = new Map(); // threadId → { setupMsgId, originalMsgId }
+const threadSetupMsgs = new Map();
 const pendencias      = new Map(); // id → { piloto, acao, resultado, timestamp, messageId, messageUrl }
+const resolvidas      = new Set(); // IDs já resolvidos — não reentram no import
 
 const THREADS_PATH    = path.join(__dirname, 'pendingThreads.json');
 const PENDENCIAS_PATH = path.join(__dirname, 'pendencias.json');
+const RESOLVIDAS_PATH = path.join(__dirname, 'resolvidas.json');
 
-// ── Persistência: threads ─────────────────────────────────────────────────────
+// ── Persistência ──────────────────────────────────────────────────────────────
 function loadThreads() {
   if (fs.existsSync(THREADS_PATH)) {
     try {
@@ -49,7 +51,6 @@ function saveThreads() {
   fs.writeFileSync(THREADS_PATH, JSON.stringify(obj, null, 2));
 }
 
-// ── Persistência: pendências ──────────────────────────────────────────────────
 function loadPendencias() {
   if (fs.existsSync(PENDENCIAS_PATH)) {
     try {
@@ -66,6 +67,28 @@ function savePendencias() {
   fs.writeFileSync(PENDENCIAS_PATH, JSON.stringify(obj, null, 2));
 }
 
+function loadResolvidas() {
+  if (fs.existsSync(RESOLVIDAS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(RESOLVIDAS_PATH, 'utf8'));
+      for (const id of data) resolvidas.add(id);
+      console.log(`✅ ${resolvidas.size} pendência(s) já resolvida(s) carregada(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar resolvidas.json:', e.message); }
+  }
+}
+
+function saveResolvidas() {
+  fs.writeFileSync(RESOLVIDAS_PATH, JSON.stringify([...resolvidas], null, 2));
+}
+
+// Marca ID como resolvido e remove do map de pendências
+function resolverPendencia(id) {
+  pendencias.delete(id);
+  resolvidas.add(id);
+  savePendencias();
+  saveResolvidas();
+}
+
 // ── Lista de ações + aliases ──────────────────────────────────────────────────
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -78,7 +101,7 @@ const ALIASES = {
   'Fleeca Praia':          ['fleeca praia', 'flecca praia', 'fleeca beach', 'praia fleeca', 'fleeca da praia'],
   'Fleeca Shopping':       ['fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping'],
   'Fleeca 68':             ['fleeca 68', 'flecca 68', '68 fleeca'],
-  'Fleeca Chaves':         ['fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado'],
+  'Fleeca Chaves':         ['fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado', 'gap'],
   'Banco Central':         ['banco central', 'central bank', 'central'],
   'Nióbio Humane':         ['niobio', 'nióbio', 'humane', 'niobio humane', 'nióbio humane'],
   'Joalheria':             ['joalheria', 'jewelry', 'joia', 'joias'],
@@ -87,16 +110,25 @@ const ALIASES = {
   'Carro Forte Faculdade': ['carro forte faculdade', 'faculdade'],
 };
 
-// Resolve qualquer título/texto para o nome canônico da ação
 function resolverAcao(titulo) {
   if (!titulo) return null;
   const t = normalizar(titulo);
   for (const [acao, aliases] of Object.entries(ALIASES)) {
     if (aliases.some(a => t.includes(normalizar(a)))) return acao;
   }
-  // Fallback: tenta match direto contra a lista de ações
   const direto = ACOES.find(a => t.includes(normalizar(a)));
   return direto ?? titulo;
+}
+
+function extrairDataDoTitulo(titulo) {
+  if (!titulo) return null;
+  const match = titulo.match(/(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/);
+  if (!match) return null;
+  const dia = parseInt(match[1]);
+  const mes = parseInt(match[2]) - 1;
+  const ano = match[3] ? (parseInt(match[3]) < 100 ? 2000 + parseInt(match[3]) : parseInt(match[3])) : new Date().getFullYear();
+  const data = new Date(ano, mes, dia);
+  return isNaN(data.getTime()) ? null : data;
 }
 
 const URL_REGEX = /https?:\/\/\S+/i;
@@ -123,7 +155,7 @@ function normalizar(str) {
   return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
-// ── Fetch título do YouTube via oEmbed (sem API key) ─────────────────────────
+// ── Fetch título do YouTube via oEmbed ────────────────────────────────────────
 async function fetchTituloYoutube(url) {
   try {
     const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
@@ -137,7 +169,6 @@ async function fetchTituloYoutube(url) {
 
 // ── Parser do embed de pendência ──────────────────────────────────────────────
 function limpar(str) {
-  // Remove blockquote ("> ") e pipe ("| ") do início de cada linha
   return (str || '').replace(/^[>|]\s*/gm, '').trim();
 }
 
@@ -154,11 +185,8 @@ function parseEmbedPendencia(message) {
     if (pilotoField) {
       const val    = limpar(pilotoField.value);
       const mencao = val.match(/^<@!?(\d+)>/);
-      if (mencao) {
-        pilotoId = mencao[1];
-      } else {
-        piloto = val.replace(/^@#\d+\s*/, '').trim();
-      }
+      if (mencao) pilotoId = mencao[1];
+      else        piloto   = val.replace(/^@#\d+\s*/, '').trim();
     }
   } else if (message.content) {
     const lines = message.content.split('\n').map(l => limpar(l)).filter(Boolean);
@@ -191,26 +219,27 @@ function encontrarMembro(guild, nomePiloto, pilotoId) {
       ?? null;
 }
 
-// ── Helper: registra pendência (valida cargo e mês) ───────────────────────────
+// ── Helper: registra pendência ────────────────────────────────────────────────
 async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
 
-  // Só o mês atual
-  const agora   = new Date();
-  const msgData = new Date(msg.createdAt);
+  // Janela de 7 dias
+  const agora    = new Date();
+  const msgData  = new Date(msg.createdAt);
   const diffDias = (agora - msgData) / (1000 * 60 * 60 * 24);
   if (diffDias > 7) return false;
 
-  // Não duplica
+  // Não duplica e não re-registra resolvidas
   if (pendencias.has(parsed.id)) return false;
+  if (resolvidas.has(parsed.id)) return false;
 
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
   if (guild) {
     const membro = encontrarMembro(guild, parsed.piloto, parsed.pilotoId);
 
     if (!membro) {
-      console.log(`⏭️  Piloto não encontrado no servidor, ignorando: ${parsed.piloto ?? parsed.pilotoId}`);
+      console.log(`⏭️  Piloto não encontrado: ${parsed.piloto ?? parsed.pilotoId}`);
       return false;
     }
 
@@ -218,8 +247,8 @@ async function registrarPendencia(msg) {
     const temPiloto    = membro.roles.cache.has(process.env.PILOT_ROLE_ID);
     const temAvaliador = membro.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 
-    if (temAvaliador) { console.log(`⏭️  Avaliador isento, ignorando: ${nomeReal}`); return false; }
-    if (!temPiloto)   { console.log(`⏭️  Sem cargo de piloto, ignorando: ${nomeReal}`); return false; }
+    if (temAvaliador) { console.log(`⏭️  Avaliador isento: ${nomeReal}`); return false; }
+    if (!temPiloto)   { console.log(`⏭️  Sem cargo de piloto: ${nomeReal}`); return false; }
 
     parsed.piloto = nomeReal;
   }
@@ -237,7 +266,7 @@ async function registrarPendencia(msg) {
   return true;
 }
 
-// ── Matching: vídeo chegou → tenta resolver pendência ────────────────────────
+// ── Matching ──────────────────────────────────────────────────────────────────
 const MATCH_THRESHOLD     = 0.38;
 const DATA_TOLERANCE_DIAS = 7;
 
@@ -254,21 +283,17 @@ function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
       dice(p.piloto ?? '', pilotoNome),
       normalizar(pilotoNome).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
     );
-
-    // Se temos o título do vídeo resolvido, usa no score; senão não penaliza
     const scoreAcao = acaoVideo && p.acao
       ? dice(normalizar(acaoVideo), normalizar(p.acao))
       : 0.5;
 
     const total = scorePiloto * 0.60 + scoreAcao * 0.25 + scoreData * 0.15;
-
     if (total > melhorScore) { melhorScore = total; melhorId = id; melhorData = p; }
   }
 
   if (melhorId && melhorScore >= MATCH_THRESHOLD) {
-    pendencias.delete(melhorId);
-    savePendencias();
-    return { score: melhorScore, ...melhorData };
+    resolverPendencia(melhorId);
+    return { score: melhorScore, id: melhorId, ...melhorData };
   }
   return null;
 }
@@ -278,6 +303,7 @@ client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
   loadThreads();
   loadPendencias();
+  loadResolvidas();
 
   const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
   if (mainGuild) {
@@ -310,25 +336,30 @@ client.on('messageCreate', async (message) => {
   try {
     const pilotoNome = message.member?.displayName ?? message.author.username;
 
-    // Tenta buscar título do YouTube se tiver link
-    let acaoDoVideo = null;
+    let acaoDoVideo      = null;
+    let timestampDoVideo = message.createdAt;
+
     const linkMatch = message.content.match(URL_REGEX);
     if (linkMatch) {
       const url = linkMatch[0];
       if (url.includes('youtube.com') || url.includes('youtu.be')) {
         const titulo = await fetchTituloYoutube(url);
         if (titulo) {
-          console.log(`🎬 Título do vídeo: ${titulo}`);
+          console.log(`🎬 Título: ${titulo}`);
           acaoDoVideo = resolverAcao(titulo);
-          console.log(`🎯 Ação resolvida: ${acaoDoVideo}`);
+          console.log(`🎯 Ação: ${acaoDoVideo}`);
+          const dataDoTitulo = extrairDataDoTitulo(titulo);
+          if (dataDoTitulo) {
+            timestampDoVideo = dataDoTitulo;
+            console.log(`📅 Data do título: ${dataDoTitulo.toLocaleDateString('pt-BR')}`);
+          }
         }
       }
     }
 
-    const resolvida = tentarResolverPendencia(pilotoNome, message.createdAt, acaoDoVideo);
+    const resolvida = tentarResolverPendencia(pilotoNome, timestampDoVideo, acaoDoVideo);
     if (resolvida) {
-      const pct = Math.round(resolvida.score * 100);
-      console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${pct}%)`);
+      console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${Math.round(resolvida.score * 100)}%)`);
     }
 
     const thread = await message.startThread({
@@ -366,10 +397,8 @@ client.on('messageCreate', async (message) => {
       const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${pilotoNome}\n**Acesse a thread:** ${threadLink}`;
       for (const [, member] of allowedRole.members) {
         if (member.user.bot) continue;
-        try {
-          await member.send(dmTexto);
-          console.log(`✉️  DM enviada para ${member.displayName}`);
-        } catch { console.warn(`⚠️  Não foi possível enviar DM para ${member.displayName}`); }
+        try { await member.send(dmTexto); }
+        catch { console.warn(`⚠️  DM falhou para ${member.displayName}`); }
       }
     }
 
@@ -386,6 +415,7 @@ async function abrirSelects(interaction) {
     return;
   }
 
+  // Defer imediatamente antes de qualquer operação assíncrona
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   let threadData = threadSetupMsgs.get(interaction.channelId);
@@ -480,12 +510,11 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /pendencias ───────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
-
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
     const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
 
     if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
-      await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -498,48 +527,40 @@ client.on('interactionCreate', async (interaction) => {
         const msgs  = await canal.messages.fetch({ limit: 100 });
         for (const [, msg] of msgs) {
           if (!msg.author.bot) continue;
-          const registrado = await registrarPendencia(msg);
-          if (registrado) importados++;
+          const ok = await registrarPendencia(msg);
+          if (ok) importados++;
         }
       }
 
-      // Filtra só o mês atual para exibição
       const agora = new Date();
       const lista = [...pendencias.entries()]
-        .filter(([, p]) => {
-          const diffDias = (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
-          return diffDias <= 7;
-        })
+        .filter(([, p]) => (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24) <= 7)
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
       if (lista.length === 0) {
         await interaction.user.send(
-          `✅ **Nenhuma pendência em aberto para ${agora.toLocaleString('pt-BR', { month: 'long' })}!**\n` +
-          (importados > 0 ? `_(${importados} importada(s) do histórico, todas já resolvidas ou isentas)_` : '')
+          `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
+          (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '')
         );
         return;
       }
 
-      const mesNome  = agora.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
       const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` +
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
-      for (const [, p] of lista) {
+      for (const [id, p] of lista) {
         const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
           `> **Piloto:** ${p.piloto ?? '—'}\n` +
           `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
-          `> **Registrado em:** ${data} | 🔗 [Ver envio](${p.messageUrl})\n`
+          `> **Registrado em:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
         );
       }
 
       let buffer = '';
       for (const linha of linhas) {
-        if ((buffer + linha).length > 1900) {
-          await interaction.user.send(buffer);
-          buffer = '';
-        }
+        if ((buffer + linha).length > 1900) { await interaction.user.send(buffer); buffer = ''; }
         buffer += linha + '\n';
       }
       if (buffer.trim()) await interaction.user.send(buffer);
@@ -548,6 +569,38 @@ client.on('interactionCreate', async (interaction) => {
       console.error('❌ Erro em /pendencias:', err.message);
       await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
     }
+    return;
+  }
+
+  // ── /resolver ─────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
+    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+
+    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const id = interaction.options.getString('id')?.trim();
+    if (!id) {
+      await interaction.reply({ content: '❌ Informe o ID da pendência.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    if (!pendencias.has(id)) {
+      await interaction.reply({ content: `❌ Nenhuma pendência encontrada com ID \`${id}\`.`, flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const p = pendencias.get(id);
+    resolverPendencia(id);
+
+    await interaction.reply({
+      content: `✅ Pendência resolvida manualmente!\n> **Piloto:** ${p.piloto ?? '—'}\n> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}`,
+      flags: MessageFlags.Ephemeral,
+    });
+    console.log(`🗑️  Resolvida manualmente: ${p.piloto} — ${p.acao} (por ${interaction.user.tag})`);
     return;
   }
 
@@ -806,8 +859,8 @@ async function gerarEPostar(interaction, dados) {
       await finalizarThread(dados);
     }
   } catch (err) {
-    console.error(err);
-    await interaction.editReply({ content: `❌ Erro: ${err.message}` });
+    console.error('❌ Erro em gerarEPostar:', err);
+    try { await interaction.editReply({ content: `❌ Erro: ${err.message}` }); } catch { /* interaction pode ter expirado */ }
   }
 }
 

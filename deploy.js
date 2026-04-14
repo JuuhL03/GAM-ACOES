@@ -7,7 +7,17 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 const commands = [
   new SlashCommandBuilder()
     .setName('pendencias')
-    .setDescription('Importa e lista as pendências de envio de vídeo do mês atual (enviado por DM)')
+    .setDescription('Importa e lista as pendências de envio de vídeo dos últimos 7 dias (enviado por DM)')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('resolver')
+    .setDescription('Resolve manualmente uma pendência pelo ID (ver em /pendencias)')
+    .addStringOption(opt =>
+      opt.setName('id')
+        .setDescription('ID completo da pendência')
+        .setRequired(true)
+    )
     .toJSON(),
 ];
 
