@@ -9,6 +9,11 @@ const commands = [
     .setName('verificar')
     .setDescription('Lista as pendências de envio de vídeo em aberto (enviado por DM)')
     .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('importar')
+    .setDescription('Importa pendências antigas do canal de pendências')
+    .toJSON(),
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);

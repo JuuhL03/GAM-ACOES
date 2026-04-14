@@ -673,4 +673,41 @@ async function gerarEPostar(interaction, dados) {
   }
 }
 
+// ── Importar: varre as ultimas mensagens para o /verificar ──────────────────────────────────────
+if (interaction.isChatInputCommand() && interaction.commandName === 'importar') {
+  const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+  const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+  if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+    await interaction.reply({ content: '❌ Sem permissão.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
+  const msgs  = await canal.messages.fetch({ limit: 100 });
+  let count   = 0;
+
+  for (const [, msg] of msgs) {
+    if (!msg.author.bot) continue; // só embeds do outro bot
+    const parsed = parseEmbedPendencia(msg);
+    if (!parsed) continue;
+    if (pendencias.has(parsed.id)) continue; // não duplica
+
+    pendencias.set(parsed.id, {
+      piloto:     parsed.piloto,
+      acao:       parsed.acao,
+      resultado:  parsed.resultado,
+      timestamp:  msg.createdAt.toISOString(),
+      messageId:  msg.id,
+      messageUrl: msg.url,
+    });
+    count++;
+  }
+
+  savePendencias();
+  await interaction.editReply({ content: `✅ ${count} pendência(s) importada(s). Total: ${pendencias.size}` });
+  return;
+}
+
 client.login(process.env.BOT_TOKEN);
