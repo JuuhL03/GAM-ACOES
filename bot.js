@@ -521,7 +521,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const mesNome  = agora.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` + ...
+      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` +
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
