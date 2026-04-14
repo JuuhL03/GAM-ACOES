@@ -66,12 +66,38 @@ function savePendencias() {
   fs.writeFileSync(PENDENCIAS_PATH, JSON.stringify(obj, null, 2));
 }
 
-// ── Lista de ações ────────────────────────────────────────────────────────────
+// ── Lista de ações + aliases ──────────────────────────────────────────────────
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
   'Banco Central', 'Banco de Paleto', 'Nióbio Humane', 'Joalheria',
   'Carro Forte Açougue', 'Carro Forte Groove', 'Carro Forte Faculdade',
 ];
+
+const ALIASES = {
+  'Banco de Paleto':       ['paleto', 'banco paleto', 'paleto day', 'paleto bank', 'bank paleto'],
+  'Fleeca Praia':          ['fleeca praia', 'flecca praia', 'fleeca beach', 'praia fleeca', 'fleeca da praia'],
+  'Fleeca Shopping':       ['fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping'],
+  'Fleeca 68':             ['fleeca 68', 'flecca 68', '68 fleeca'],
+  'Fleeca Chaves':         ['fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado'],
+  'Banco Central':         ['banco central', 'central bank', 'central'],
+  'Nióbio Humane':         ['niobio', 'nióbio', 'humane', 'niobio humane', 'nióbio humane'],
+  'Joalheria':             ['joalheria', 'jewelry', 'joia', 'joias'],
+  'Carro Forte Açougue':   ['carro forte acougue', 'carro forte açougue', 'açougue', 'acougue'],
+  'Carro Forte Groove':    ['carro forte groove', 'groove'],
+  'Carro Forte Faculdade': ['carro forte faculdade', 'faculdade'],
+};
+
+// Resolve qualquer título/texto para o nome canônico da ação
+function resolverAcao(titulo) {
+  if (!titulo) return null;
+  const t = normalizar(titulo);
+  for (const [acao, aliases] of Object.entries(ALIASES)) {
+    if (aliases.some(a => t.includes(normalizar(a)))) return acao;
+  }
+  // Fallback: tenta match direto contra a lista de ações
+  const direto = ACOES.find(a => t.includes(normalizar(a)));
+  return direto ?? titulo;
+}
 
 const URL_REGEX = /https?:\/\/\S+/i;
 
@@ -97,19 +123,36 @@ function normalizar(str) {
   return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
+// ── Fetch título do YouTube via oEmbed (sem API key) ─────────────────────────
+async function fetchTituloYoutube(url) {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.title ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Parser do embed de pendência ──────────────────────────────────────────────
+function limpar(str) {
+  // Remove blockquote ("> ") e pipe ("| ") do início de cada linha
+  return (str || '').replace(/^[>|]\s*/gm, '').trim();
+}
+
 function parseEmbedPendencia(message) {
   const embed = message.embeds?.[0];
   let acao = null, piloto = null, pilotoId = null, resultado = null, id = null;
 
   if (embed) {
-    acao      = embed.title?.trim() ?? null;
-    resultado = embed.fields?.find(f => normalizar(f.name).includes('resultado'))?.value?.trim() ?? null;
-    id        = embed.footer?.text?.replace(/^id[:\s]*/i, '').trim() ?? message.id;
+    acao      = resolverAcao(limpar(embed.title ?? '')) ?? null;
+    resultado = limpar(embed.fields?.find(f => normalizar(f.name).includes('resultado'))?.value ?? '');
+    id        = limpar(embed.footer?.text ?? '').replace(/^id[:\s]*/i, '').trim() || message.id;
 
     const pilotoField = embed.fields?.find(f => normalizar(f.name).includes('piloto'));
     if (pilotoField) {
-      const val    = pilotoField.value.replace(/^[>|]\s*/gm, '').trim();
+      const val    = limpar(pilotoField.value);
       const mencao = val.match(/^<@!?(\d+)>/);
       if (mencao) {
         pilotoId = mencao[1];
@@ -118,7 +161,7 @@ function parseEmbedPendencia(message) {
       }
     }
   } else if (message.content) {
-    const lines = message.content.split('\n').map(l => l.trim()).filter(Boolean);
+    const lines = message.content.split('\n').map(l => limpar(l)).filter(Boolean);
     for (const line of lines) {
       if (/^piloto[:\s]/i.test(line)) {
         const val    = line.replace(/^piloto[:\s]*/i, '').trim();
@@ -129,36 +172,26 @@ function parseEmbedPendencia(message) {
       if (/^resultado[:\s]/i.test(line)) resultado = line.replace(/^resultado[:\s]*/i, '').trim();
       if (/^id[:\s]/i.test(line))        id        = line.replace(/^id[:\s]*/i, '').trim();
     }
-    if (!acao && lines.length > 0 && !lines[0].includes(':')) acao = lines[0];
+    if (!acao && lines.length > 0 && !lines[0].includes(':')) acao = resolverAcao(lines[0]);
     if (!id) id = message.id;
   }
 
   if (!piloto && !pilotoId && !acao) return null;
-  return { piloto, pilotoId, acao, resultado, id: id ?? message.id };
+  return { piloto, pilotoId, acao, resultado: resultado || null, id: id ?? message.id };
 }
 
 // ── Helper: encontra membro no servidor ──────────────────────────────────────
 function encontrarMembro(guild, nomePiloto, pilotoId) {
-  // ID direto de menção — mais confiável
   if (pilotoId) return guild.members.cache.get(pilotoId) ?? null;
-
   if (!nomePiloto) return null;
   const primeiroNome = normalizar(nomePiloto).split(' ')[0];
   if (primeiroNome.length < 2) return null;
-
-  return guild.members.cache.find(m =>
-    normalizar(m.displayName) === normalizar(nomePiloto)
-  ) ?? guild.members.cache.find(m =>
-    normalizar(m.displayName).includes(primeiroNome)
-  ) ?? null;
+  return guild.members.cache.find(m => normalizar(m.displayName) === normalizar(nomePiloto))
+      ?? guild.members.cache.find(m => normalizar(m.displayName).includes(primeiroNome))
+      ?? null;
 }
 
 // ── Helper: registra pendência (valida cargo e mês) ───────────────────────────
-// Regras:
-//   - Piloto deve ter PILOT_ROLE_ID  → entra como pendência
-//   - Piloto tem ALLOWED_ROLE_ID     → isento (avaliador), ignora
-//   - Não encontrado / sem os cargos → ignora
-//   - Só considera mensagens do mês/ano atual
 async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
@@ -180,22 +213,13 @@ async function registrarPendencia(msg) {
       return false;
     }
 
-    // Usa o display name real do servidor para exibir no /pendencias
     const nomeReal     = membro.displayName;
     const temPiloto    = membro.roles.cache.has(process.env.PILOT_ROLE_ID);
     const temAvaliador = membro.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 
-    if (temAvaliador) {
-      console.log(`⏭️  Avaliador isento, ignorando: ${nomeReal}`);
-      return false;
-    }
+    if (temAvaliador) { console.log(`⏭️  Avaliador isento, ignorando: ${nomeReal}`); return false; }
+    if (!temPiloto)   { console.log(`⏭️  Sem cargo de piloto, ignorando: ${nomeReal}`); return false; }
 
-    if (!temPiloto) {
-      console.log(`⏭️  Sem cargo de piloto, ignorando: ${nomeReal}`);
-      return false;
-    }
-
-    // Salva com o nome real do servidor (não o que veio no embed)
     parsed.piloto = nomeReal;
   }
 
@@ -216,7 +240,7 @@ async function registrarPendencia(msg) {
 const MATCH_THRESHOLD     = 0.38;
 const DATA_TOLERANCE_DIAS = 7;
 
-function tentarResolverPendencia(pilotoNome, timestampVideo) {
+function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
   let melhorId = null, melhorScore = 0, melhorData = null;
 
   for (const [id, p] of pendencias.entries()) {
@@ -229,7 +253,13 @@ function tentarResolverPendencia(pilotoNome, timestampVideo) {
       dice(p.piloto ?? '', pilotoNome),
       normalizar(pilotoNome).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
     );
-    const total = scorePiloto * 0.75 + scoreData * 0.25;
+
+    // Se temos o título do vídeo resolvido, usa no score; senão não penaliza
+    const scoreAcao = acaoVideo && p.acao
+      ? dice(normalizar(acaoVideo), normalizar(p.acao))
+      : 0.5;
+
+    const total = scorePiloto * 0.60 + scoreAcao * 0.25 + scoreData * 0.15;
 
     if (total > melhorScore) { melhorScore = total; melhorId = id; melhorData = p; }
   }
@@ -261,16 +291,15 @@ client.on('error', (err) => console.error('Erro no client:', err.message));
 
 // ── Mensagens ─────────────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  // Ignora bots, exceto no canal de pendências (onde outro bot posta os embeds)
   if (message.author.bot && message.channelId !== process.env.PENDENCIAS_CHANNEL_ID) return;
 
-  // ── Canal de pendências: registra embed como pendência ───────────────────
+  // ── Canal de pendências ───────────────────────────────────────────────────
   if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
     await registrarPendencia(message);
     return;
   }
 
-  // ── Canal de ações: cria thread + tenta resolver pendência ───────────────
+  // ── Canal de ações ────────────────────────────────────────────────────────
   if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
 
   const temLink    = URL_REGEX.test(message.content);
@@ -280,7 +309,22 @@ client.on('messageCreate', async (message) => {
   try {
     const pilotoNome = message.member?.displayName ?? message.author.username;
 
-    const resolvida = tentarResolverPendencia(pilotoNome, message.createdAt);
+    // Tenta buscar título do YouTube se tiver link
+    let acaoDoVideo = null;
+    const linkMatch = message.content.match(URL_REGEX);
+    if (linkMatch) {
+      const url = linkMatch[0];
+      if (url.includes('youtube.com') || url.includes('youtu.be')) {
+        const titulo = await fetchTituloYoutube(url);
+        if (titulo) {
+          console.log(`🎬 Título do vídeo: ${titulo}`);
+          acaoDoVideo = resolverAcao(titulo);
+          console.log(`🎯 Ação resolvida: ${acaoDoVideo}`);
+        }
+      }
+    }
+
+    const resolvida = tentarResolverPendencia(pilotoNome, message.createdAt, acaoDoVideo);
     if (resolvida) {
       const pct = Math.round(resolvida.score * 100);
       console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${pct}%)`);
@@ -343,7 +387,6 @@ async function abrirSelects(interaction) {
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  // Recupera dados da thread do cache ou dinamicamente pós-restart
   let threadData = threadSetupMsgs.get(interaction.channelId);
 
   if (!threadData) {
@@ -434,7 +477,7 @@ async function abrirSelects(interaction) {
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
 
-  // ── /pendencias: importa histórico + lista pendências em aberto ───────────
+  // ── /pendencias ───────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
 
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
@@ -448,7 +491,6 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
-      // Importa histórico do canal de pendências
       let importados = 0;
       if (process.env.PENDENCIAS_CHANNEL_ID) {
         const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
@@ -460,18 +502,25 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
-      if (pendencias.size === 0) {
+      // Filtra só o mês atual para exibição
+      const agora = new Date();
+      const lista = [...pendencias.entries()]
+        .filter(([, p]) => {
+          const d = new Date(p.timestamp);
+          return d.getMonth() === agora.getMonth() && d.getFullYear() === agora.getFullYear();
+        })
+        .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
+
+      if (lista.length === 0) {
         await interaction.user.send(
-          `✅ **Nenhuma pendência em aberto!**\n` +
+          `✅ **Nenhuma pendência em aberto para ${agora.toLocaleString('pt-BR', { month: 'long' })}!**\n` +
           (importados > 0 ? `_(${importados} importada(s) do histórico, todas já resolvidas ou isentas)_` : '')
         );
         return;
       }
 
-      const lista = [...pendencias.entries()]
-        .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
-
-      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões)**` +
+      const mesNome  = agora.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
+      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) em ${mesNome}**` +
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
