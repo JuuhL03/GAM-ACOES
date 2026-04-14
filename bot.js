@@ -200,7 +200,7 @@ async function registrarPendencia(msg) {
   const agora   = new Date();
   const msgData = new Date(msg.createdAt);
   const diffDias = (agora - msgData) / (1000 * 60 * 60 * 24);
-  if (diffDias > 35) return false;
+  if (diffDias > 7) return false;
 
   // Não duplica
   if (pendencias.has(parsed.id)) return false;
@@ -508,7 +508,7 @@ client.on('interactionCreate', async (interaction) => {
       const lista = [...pendencias.entries()]
         .filter(([, p]) => {
           const diffDias = (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
-          return diffDias <= 35;
+          return diffDias <= 7;
         })
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
@@ -521,7 +521,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const mesNome  = agora.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) em ${mesNome}**` +
+      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` + ...
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
