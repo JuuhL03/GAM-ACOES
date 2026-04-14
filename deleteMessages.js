@@ -1,37 +1,73 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 
-// ── IDs das mensagens que você quer apagar ────────────────────────────────────
-const MESSAGE_IDS = [
-  '1488296088711467208'
+// ── IDs das mensagens ORIGINAIS (do canal principal) ──────────────────────────
+// O script vai achar a thread de cada uma e apagar as mensagens do bot lá dentro
+const ORIGINAL_MSG_IDS = [
+  '1488986145579729048'
 ];
 
-// ── ID do canal onde estão as mensagens ──────────────────────────────────────
-const CHANNEL_ID = process.env.SETUP_CHANNEL_ID; // ou coloca o ID direto aqui
-
+// ── IDs específicos de mensagens pra apagar dentro das threads (opcional) ─────
+// Se quiser apagar mensagens específicas pelo ID, coloca aqui.
+// Se deixar vazio [], o script apaga TODAS as mensagens do bot em cada thread.
+const MSG_IDS_ESPECIFICOS = [
+  '1488986147681079468'
+];
 // ─────────────────────────────────────────────────────────────────────────────
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 client.once('ready', async () => {
   console.log(`✅ Logado como ${client.user.tag}`);
 
-  try {
-    const canal = await client.channels.fetch(CHANNEL_ID);
+  const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
 
-    for (const id of MESSAGE_IDS) {
-      try {
-        const msg = await canal.messages.fetch(id);
-        await msg.delete();
-        console.log(`🗑️  Mensagem ${id} apagada.`);
-      } catch (err) {
-        console.error(`❌ Não foi possível apagar ${id}:`, err.message);
+  for (const originalMsgId of ORIGINAL_MSG_IDS) {
+    try {
+      const msg = await canal.messages.fetch(originalMsgId);
+
+      if (!msg.thread) {
+        console.log(`⚠️  Mensagem ${originalMsgId} não tem thread associada.`);
+        continue;
       }
+
+      const thread = msg.thread;
+      console.log(`🔍 Thread encontrada: ${thread.name} (${thread.id})`);
+
+      if (MSG_IDS_ESPECIFICOS.length > 0) {
+        // Apaga apenas os IDs específicos
+        for (const msgId of MSG_IDS_ESPECIFICOS) {
+          try {
+            const m = await thread.messages.fetch(msgId);
+            await m.delete();
+            console.log(`🗑️  Mensagem ${msgId} apagada.`);
+          } catch (err) {
+            console.error(`❌ Não foi possível apagar ${msgId}:`, err.message);
+          }
+        }
+      } else {
+        // Apaga todas as mensagens do bot na thread
+        const msgs = await thread.messages.fetch({ limit: 100 });
+        const doBot = msgs.filter(m => m.author.id === client.user.id);
+        for (const [, m] of doBot) {
+          try {
+            await m.delete();
+            console.log(`🗑️  Mensagem ${m.id} apagada da thread ${thread.name}.`);
+          } catch (err) {
+            console.error(`❌ Não foi possível apagar ${m.id}:`, err.message);
+          }
+        }
+      }
+
+    } catch (err) {
+      console.error(`❌ Erro ao processar mensagem ${originalMsgId}:`, err.message);
     }
-  } catch (err) {
-    console.error('❌ Erro ao acessar o canal:', err.message);
   }
 
   console.log('✅ Pronto! Encerrando...');
