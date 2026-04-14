@@ -100,7 +100,7 @@ function normalizar(str) {
 // ── Parser do embed de pendência ──────────────────────────────────────────────
 function parseEmbedPendencia(message) {
   const embed = message.embeds?.[0];
-  let acao = null, piloto = null, resultado = null, id = null;
+  let acao = null, piloto = null, pilotoId = null, resultado = null, id = null;
 
   if (embed) {
     acao      = embed.title?.trim() ?? null;
@@ -108,11 +108,26 @@ function parseEmbedPendencia(message) {
     id        = embed.footer?.text?.replace(/^id[:\s]*/i, '').trim() ?? message.id;
 
     const pilotoField = embed.fields?.find(f => normalizar(f.name).includes('piloto'));
-    if (pilotoField) piloto = pilotoField.value.replace(/^@#\d+\s*/, '').trim();
+    if (pilotoField) {
+      const val    = pilotoField.value.trim();
+      const mencao = val.match(/^<@!?(\d+)>/);
+      if (mencao) {
+        // Campo veio como menção — extrai o ID direto
+        pilotoId = mencao[1];
+      } else {
+        // Campo veio como texto — remove prefixo "@#XXXX " se houver
+        piloto = val.replace(/^@#\d+\s*/, '').trim();
+      }
+    }
   } else if (message.content) {
     const lines = message.content.split('\n').map(l => l.trim()).filter(Boolean);
     for (const line of lines) {
-      if (/^piloto[:\s]/i.test(line))    piloto    = line.replace(/^piloto[:\s]*/i, '').replace(/^@#\d+\s*/, '').trim();
+      if (/^piloto[:\s]/i.test(line)) {
+        const val    = line.replace(/^piloto[:\s]*/i, '').trim();
+        const mencao = val.match(/^<@!?(\d+)>/);
+        if (mencao) pilotoId = mencao[1];
+        else        piloto   = val.replace(/^@#\d+\s*/, '').trim();
+      }
       if (/^resultado[:\s]/i.test(line)) resultado = line.replace(/^resultado[:\s]*/i, '').trim();
       if (/^id[:\s]/i.test(line))        id        = line.replace(/^id[:\s]*/i, '').trim();
     }
@@ -120,17 +135,19 @@ function parseEmbedPendencia(message) {
     if (!id) id = message.id;
   }
 
-  if (!piloto && !acao) return null;
-  return { piloto, acao, resultado, id: id ?? message.id };
+  if (!piloto && !pilotoId && !acao) return null;
+  return { piloto, pilotoId, acao, resultado, id: id ?? message.id };
 }
 
-// ── Helper: encontra membro pelo nome do embed ────────────────────────────────
-function encontrarMembro(guild, nomePiloto) {
+// ── Helper: encontra membro no servidor ──────────────────────────────────────
+function encontrarMembro(guild, nomePiloto, pilotoId) {
+  // ID direto de menção — mais confiável
+  if (pilotoId) return guild.members.cache.get(pilotoId) ?? null;
+
   if (!nomePiloto) return null;
   const primeiroNome = normalizar(nomePiloto).split(' ')[0];
   if (primeiroNome.length < 2) return null;
 
-  // Tenta match exato primeiro, depois por contains
   return guild.members.cache.find(m =>
     normalizar(m.displayName) === normalizar(nomePiloto)
   ) ?? guild.members.cache.find(m =>
@@ -140,9 +157,9 @@ function encontrarMembro(guild, nomePiloto) {
 
 // ── Helper: registra pendência (valida cargo e mês) ───────────────────────────
 // Regras:
-//   - Piloto deve ter PILOT_ROLE_ID → entra como pendência
-//   - Piloto tem ALLOWED_ROLE_ID (avaliador) → isento, ignora
-//   - Piloto não tem nenhum dos dois → ignora
+//   - Piloto deve ter PILOT_ROLE_ID  → entra como pendência
+//   - Piloto tem ALLOWED_ROLE_ID     → isento (avaliador), ignora
+//   - Não encontrado / sem os cargos → ignora
 //   - Só considera mensagens do mês/ano atual
 async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
@@ -158,25 +175,30 @@ async function registrarPendencia(msg) {
 
   const guild = client.guilds.cache.get(process.env.GUILD_ID);
   if (guild) {
-    const membro = encontrarMembro(guild, parsed.piloto);
+    const membro = encontrarMembro(guild, parsed.piloto, parsed.pilotoId);
 
     if (!membro) {
-      console.log(`⏭️  Piloto não encontrado no servidor, ignorando: ${parsed.piloto}`);
+      console.log(`⏭️  Piloto não encontrado no servidor, ignorando: ${parsed.piloto ?? parsed.pilotoId}`);
       return false;
     }
 
+    // Usa o display name real do servidor para exibir no /pendencias
+    const nomeReal     = membro.displayName;
     const temPiloto    = membro.roles.cache.has(process.env.PILOT_ROLE_ID);
     const temAvaliador = membro.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 
     if (temAvaliador) {
-      console.log(`⏭️  Avaliador isento, ignorando: ${parsed.piloto}`);
+      console.log(`⏭️  Avaliador isento, ignorando: ${nomeReal}`);
       return false;
     }
 
     if (!temPiloto) {
-      console.log(`⏭️  Sem cargo de piloto, ignorando: ${parsed.piloto}`);
+      console.log(`⏭️  Sem cargo de piloto, ignorando: ${nomeReal}`);
       return false;
     }
+
+    // Salva com o nome real do servidor (não o que veio no embed)
+    parsed.piloto = nomeReal;
   }
 
   pendencias.set(parsed.id, {
@@ -417,7 +439,6 @@ client.on('interactionCreate', async (interaction) => {
   // ── /pendencias: importa histórico + lista pendências em aberto ───────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
 
-    // Checa cargo no servidor, mesmo que o comando venha de DM
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
     const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
 
@@ -429,12 +450,11 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
-      // ── Importa histórico do canal de pendências ────────────────────────
+      // Importa histórico do canal de pendências
       let importados = 0;
       if (process.env.PENDENCIAS_CHANNEL_ID) {
         const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
         const msgs  = await canal.messages.fetch({ limit: 100 });
-
         for (const [, msg] of msgs) {
           if (!msg.author.bot) continue;
           const registrado = await registrarPendencia(msg);
@@ -442,7 +462,6 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
-      // ── Monta lista de pendências ────────────────────────────────────────
       if (pendencias.size === 0) {
         await interaction.user.send(
           `✅ **Nenhuma pendência em aberto!**\n` +
@@ -458,7 +477,6 @@ client.on('interactionCreate', async (interaction) => {
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
-
       for (const [, p] of lista) {
         const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
@@ -468,7 +486,6 @@ client.on('interactionCreate', async (interaction) => {
         );
       }
 
-      // Envia por DM, dividindo se passar de 1900 chars
       let buffer = '';
       for (const linha of linhas) {
         if ((buffer + linha).length > 1900) {
