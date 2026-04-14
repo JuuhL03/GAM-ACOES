@@ -109,13 +109,11 @@ function parseEmbedPendencia(message) {
 
     const pilotoField = embed.fields?.find(f => normalizar(f.name).includes('piloto'));
     if (pilotoField) {
-      const val    = pilotoField.value.trim();
+      const val    = pilotoField.value.replace(/^[>|]\s*/gm, '').trim();
       const mencao = val.match(/^<@!?(\d+)>/);
       if (mencao) {
-        // Campo veio como menção — extrai o ID direto
         pilotoId = mencao[1];
       } else {
-        // Campo veio como texto — remove prefixo "@#XXXX " se houver
         piloto = val.replace(/^@#\d+\s*/, '').trim();
       }
     }
