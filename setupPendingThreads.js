@@ -11,7 +11,9 @@ const path = require('path');
 
 // ── Coloque aqui os IDs das mensagens originais pendentes ─────────────────────
 const PENDENTES = [
-  '1487676409190027284'
+  '1492726992121102466',
+  '1492727039789109369',
+  '1492727088988295238'
   // adicione quantos precisar...
 ];
 // ─────────────────────────────────────────────────────────────────────────────

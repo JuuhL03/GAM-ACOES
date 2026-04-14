@@ -173,7 +173,8 @@ client.on('error', (err) => console.error('Erro no client:', err.message));
 
 // ── Mensagens ─────────────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+  // Ignora bots, exceto no canal de pendências (onde outro bot posta os embeds)
+  if (message.author.bot && message.channelId !== process.env.PENDENCIAS_CHANNEL_ID) return;
 
   // ── Canal de pendências: registra embed como pendência ───────────────────
   if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
