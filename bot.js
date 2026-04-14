@@ -199,7 +199,8 @@ async function registrarPendencia(msg) {
   // Só o mês atual
   const agora   = new Date();
   const msgData = new Date(msg.createdAt);
-  if (msgData.getMonth() !== agora.getMonth() || msgData.getFullYear() !== agora.getFullYear()) return false;
+  const diffDias = (agora - msgData) / (1000 * 60 * 60 * 24);
+  if (diffDias > 35) return false;
 
   // Não duplica
   if (pendencias.has(parsed.id)) return false;
@@ -506,8 +507,8 @@ client.on('interactionCreate', async (interaction) => {
       const agora = new Date();
       const lista = [...pendencias.entries()]
         .filter(([, p]) => {
-          const d = new Date(p.timestamp);
-          return d.getMonth() === agora.getMonth() && d.getFullYear() === agora.getFullYear();
+          const diffDias = (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
+          return diffDias <= 35;
         })
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
