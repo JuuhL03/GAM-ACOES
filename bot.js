@@ -98,11 +98,11 @@ const ACOES = [
 
 const ALIASES = {
   'Banco de Paleto':       ['paleto', 'banco paleto', 'paleto day', 'paleto bank', 'bank paleto'],
-  'Fleeca Praia':          ['fleeca praia', 'flecca praia', 'fleeca beach', 'praia fleeca', 'fleeca da praia'],
-  'Fleeca Shopping':       ['fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping'],
-  'Fleeca 68':             ['fleeca 68', 'flecca 68', '68 fleeca'],
-  'Fleeca Chaves':         ['fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado', 'gap'],
-  'Banco Central':         ['banco central', 'central bank', 'central'],
+  'Fleeca Praia':          ['praia', 'fleeca praia', 'flecca praia', 'fleeca beach', 'praia fleeca', 'fleeca da praia'],
+  'Fleeca Shopping':       ['shopping', 'fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping'],
+  'Fleeca 68':             ['68', 'fleeca 68', 'flecca 68', '68 fleeca'],
+  'Fleeca Chaves':         ['chaves', 'fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado', 'gap'],
+  'Banco Central':         ['central', 'banco central', 'central bank'],
   'Nióbio Humane':         ['niobio', 'nióbio', 'humane', 'niobio humane', 'nióbio humane'],
   'Joalheria':             ['joalheria', 'jewelry', 'joia', 'joias'],
   'Carro Forte Açougue':   ['carro forte acougue', 'carro forte açougue', 'açougue', 'acougue'],
@@ -110,14 +110,31 @@ const ALIASES = {
   'Carro Forte Faculdade': ['carro forte faculdade', 'faculdade'],
 };
 
+// Palavras de ligação removidas antes de comparar
+const FILLER = new Set(['de', 'da', 'do', 'das', 'dos', 'a', 'o', 'as', 'os', 'e', 'em', 'no', 'na', 'num', 'numa']);
+
+function stripFiller(str) {
+  return str.split(/\s+/).filter(w => !FILLER.has(w)).join(' ');
+}
+
 function resolverAcao(titulo) {
   if (!titulo) return null;
-  const t = normalizar(titulo);
+  const t         = normalizar(titulo);
+  const tStripped = stripFiller(t);
+
   for (const [acao, aliases] of Object.entries(ALIASES)) {
-    if (aliases.some(a => t.includes(normalizar(a)))) return acao;
+    if (aliases.some(a => {
+      const na = normalizar(a);
+      return t.includes(na) || tStripped.includes(stripFiller(na));
+    })) return acao;
   }
-  const direto = ACOES.find(a => t.includes(normalizar(a)));
-  return direto ?? titulo;
+
+  const direto = ACOES.find(a => {
+    const na = normalizar(a);
+    return t.includes(na) || tStripped.includes(stripFiller(na));
+  });
+
+  return direto ?? null; // não reconheceu = ignora no matching
 }
 
 function extrairDataDoTitulo(titulo) {
@@ -224,6 +241,12 @@ async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
 
+  // Ignora não-ações (Sequestro, Comboio, etc.)
+  if (!parsed.acao) {
+    console.log(`⏭️  Ação não reconhecida, ignorando: "${msg.embeds?.[0]?.title ?? '(sem título)'}"`);
+    return false;
+  }
+
   // Janela de 7 dias
   const agora    = new Date();
   const msgData  = new Date(msg.createdAt);
@@ -267,25 +290,44 @@ async function registrarPendencia(msg) {
 }
 
 // ── Matching ──────────────────────────────────────────────────────────────────
-const MATCH_THRESHOLD     = 0.38;
-const DATA_TOLERANCE_DIAS = 7;
+const MATCH_THRESHOLD       = 0.38;
+const MIN_PILOTO_SCORE      = 0.20;
+const DATA_TOLERANCE_DIAS   = 7;
+
+// Remove prefixo #XXXX dos nomes de piloto pra comparação limpa
+function stripPilotoId(nome) {
+  return (nome || '').replace(/^#\d+\s*/, '').trim();
+}
 
 function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
   let melhorId = null, melhorScore = 0, melhorData = null;
+
+  const pilotoLimpo = stripPilotoId(pilotoNome);
 
   for (const [id, p] of pendencias.entries()) {
     const diffDias = Math.abs(new Date(p.timestamp) - timestampVideo) / (1000 * 60 * 60 * 24);
     if (diffDias > DATA_TOLERANCE_DIAS) continue;
 
-    const scoreData    = 1 - diffDias / DATA_TOLERANCE_DIAS;
-    const primeiroNome = normalizar(p.piloto ?? '').split(' ')[0];
-    const scorePiloto  = Math.max(
-      dice(p.piloto ?? '', pilotoNome),
-      normalizar(pilotoNome).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
+    const scoreData       = 1 - diffDias / DATA_TOLERANCE_DIAS;
+    const pendenciaLimpo  = stripPilotoId(p.piloto ?? '');
+    const primeiroNome    = normalizar(pendenciaLimpo).split(' ')[0];
+    const scorePiloto     = Math.max(
+      dice(pendenciaLimpo, pilotoLimpo),
+      normalizar(pilotoLimpo).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
     );
-    const scoreAcao = acaoVideo && p.acao
-      ? dice(normalizar(acaoVideo), normalizar(p.acao))
-      : 0.5;
+
+    // Piloto tem que ter semelhança mínima
+    if (scorePiloto < MIN_PILOTO_SCORE) continue;
+
+    // Se a ação do vídeo é conhecida, compara exatamente com a pendência
+    let scoreAcao = 0.5; // fallback se não tem ação no vídeo
+    if (acaoVideo && p.acao) {
+      const acaoPendencia = resolverAcao(p.acao) ?? p.acao;
+      scoreAcao = normalizar(acaoVideo) === normalizar(acaoPendencia) ? 1.0 : 0.0;
+    }
+
+    // Se a ação é conhecida mas não bateu, pula — não resolve ação errada
+    if (acaoVideo && scoreAcao === 0) continue;
 
     const total = scorePiloto * 0.60 + scoreAcao * 0.25 + scoreData * 0.15;
     if (total > melhorScore) { melhorScore = total; melhorId = id; melhorData = p; }
@@ -347,7 +389,11 @@ client.on('messageCreate', async (message) => {
         if (titulo) {
           console.log(`🎬 Título: ${titulo}`);
           acaoDoVideo = resolverAcao(titulo);
-          console.log(`🎯 Ação: ${acaoDoVideo}`);
+          if (acaoDoVideo) {
+            console.log(`🎯 Ação reconhecida: ${acaoDoVideo}`);
+          } else {
+            console.log(`⏭️  Título não corresponde a nenhuma ação conhecida: "${titulo}"`);
+          }
           const dataDoTitulo = extrairDataDoTitulo(titulo);
           if (dataDoTitulo) {
             timestampDoVideo = dataDoTitulo;
@@ -357,7 +403,11 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    const resolvida = tentarResolverPendencia(pilotoNome, timestampDoVideo, acaoDoVideo);
+    // Só tenta matching se a ação foi reconhecida
+    const resolvida = acaoDoVideo
+      ? tentarResolverPendencia(pilotoNome, timestampDoVideo, acaoDoVideo)
+      : null;
+
     if (resolvida) {
       console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${Math.round(resolvida.score * 100)}%)`);
     }
@@ -572,7 +622,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── /resolver ─────────────────────────────────────────────────────────────
+  // ── /resolver (aceita múltiplos IDs separados por vírgula) ────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
     const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
@@ -582,25 +632,39 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    const id = interaction.options.getString('id')?.trim();
-    if (!id) {
-      await interaction.reply({ content: '❌ Informe o ID da pendência.', flags: MessageFlags.Ephemeral });
+    const input = interaction.options.getString('id')?.trim();
+    if (!input) {
+      await interaction.reply({ content: '❌ Informe o(s) ID(s) da(s) pendência(s).', flags: MessageFlags.Ephemeral });
       return;
     }
 
-    if (!pendencias.has(id)) {
-      await interaction.reply({ content: `❌ Nenhuma pendência encontrada com ID \`${id}\`.`, flags: MessageFlags.Ephemeral });
-      return;
+    const ids = input.split(',').map(s => s.trim()).filter(Boolean);
+
+    const resultados = [];
+    let okCount = 0, failCount = 0;
+
+    for (const id of ids) {
+      if (!pendencias.has(id)) {
+        resultados.push(`❌ \`${id}\` — não encontrada`);
+        failCount++;
+        continue;
+      }
+      const p = pendencias.get(id);
+      resolverPendencia(id);
+      resultados.push(`✅ \`${id}\` — ${p.piloto ?? '—'} | ${p.acao ?? '—'}`);
+      okCount++;
     }
 
-    const p = pendencias.get(id);
-    resolverPendencia(id);
+    const resumo = ids.length > 1
+      ? `**${okCount} resolvida(s), ${failCount} não encontrada(s)**\n\n`
+      : '';
 
     await interaction.reply({
-      content: `✅ Pendência resolvida manualmente!\n> **Piloto:** ${p.piloto ?? '—'}\n> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}`,
+      content: resumo + resultados.join('\n'),
       flags: MessageFlags.Ephemeral,
     });
-    console.log(`🗑️  Resolvida manualmente: ${p.piloto} — ${p.acao} (por ${interaction.user.tag})`);
+
+    console.log(`🗑️  Resolver batch: ${okCount} ok, ${failCount} falha (por ${interaction.user.tag})`);
     return;
   }
 
