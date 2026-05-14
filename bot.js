@@ -757,7 +757,6 @@ client.on('interactionCreate', async (interaction) => {
       calls:     interaction.fields.getTextInputValue('calls'),
       melhorias: interaction.fields.getTextInputValue('positivos'),
       negativos: interaction.fields.getTextInputValue('negativos'),
-      autor:     interaction.member.displayName,
     });
     return;
   }
@@ -811,7 +810,6 @@ client.on('interactionCreate', async (interaction) => {
       comportamento: interaction.fields.getTextInputValue('comportamento'),
       melhorias:     interaction.fields.getTextInputValue('positivos'),
       negativos:     interaction.fields.getTextInputValue('negativos'),
-      autor:         interaction.member.displayName,
     });
     return;
   }
@@ -839,7 +837,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const membro = await interaction.guild.members.fetch(dmData.pilotoId);
       await membro.send({
-        content: `Segue o relatório da sua última ação em **${dmData.acao}** - ${dmData.data}. Qualquer dúvida referente, procure por **${dmData.autor}**. <:gam:1470956318494953552>`,
+        content: `Segue o relatório da sua última ação em **${dmData.acao}** - ${dmData.data}. Qualquer dúvida, procure a liderança. <:gam:1470956318494953552>`,
         files: [dmData.imagePath],
       });
       await interaction.update({ content: `✅ Relatório postado e enviado por DM para **${dmData.pilotoNome}**!`, components: [] });
@@ -904,7 +902,6 @@ async function gerarEPostar(interaction, dados) {
         pilotoNome:    dados.pilotoNome,
         acao:          dados.acao,
         data:          dados.data,
-        autor:         dados.autor,
         channelId:     dados.channelId,
         setupMsgId:    dados.setupMsgId    ?? null,
         originalMsgId: dados.originalMsgId ?? null,
