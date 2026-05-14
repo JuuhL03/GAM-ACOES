@@ -191,7 +191,7 @@ async function generateReportImage(dados) {
 
   ctx.fillStyle = C.textDim;
   ctx.font = `${12 * SCALE}px ${F}`;
-  ctx.fillText(`Emitido por ${dados.autor}  ·  Sistema de Análise Tática GAM`, PAD, y + 58 * SCALE);
+  ctx.fillText('Sistema de Análise Tática GAM', PAD, y + 58 * SCALE);
 
   // Badge resultado
   const isVit  = dados.resultado === 'Vitória';
@@ -225,10 +225,9 @@ async function generateReportImage(dados) {
   ctx.fillRect(0, y, W, S.metaRow);
 
   const metaCols = [
-    { label: 'DATA',     valor: dados.data      },
-    { label: 'AÇÃO',     valor: dados.acao       },
-    { label: 'PILOTO',   valor: dados.pilotoNome },
-    { label: 'ANALISTA', valor: dados.autor      },
+    { label: 'DATA',   valor: dados.data      },
+    { label: 'AÇÃO',   valor: dados.acao       },
+    { label: 'PILOTO', valor: dados.pilotoNome },
   ];
   const colW = INNER / metaCols.length;
 
