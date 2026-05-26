@@ -27,8 +27,8 @@ const client = new Client({
 const pending         = new Map();
 const pendingDM       = new Map();
 const threadSetupMsgs = new Map();
-const pendencias      = new Map(); // id → { piloto, acao, resultado, timestamp, messageId, messageUrl }
-const resolvidas      = new Set(); // IDs já resolvidos — não reentram no import
+const pendencias      = new Map();
+const resolvidas      = new Set();
 
 const THREADS_PATH    = path.join(__dirname, 'pendingThreads.json');
 const PENDENCIAS_PATH = path.join(__dirname, 'pendencias.json');
@@ -81,7 +81,6 @@ function saveResolvidas() {
   fs.writeFileSync(RESOLVIDAS_PATH, JSON.stringify([...resolvidas], null, 2));
 }
 
-// Marca ID como resolvido e remove do map de pendências
 function resolverPendencia(id) {
   pendencias.delete(id);
   resolvidas.add(id);
@@ -110,7 +109,6 @@ const ALIASES = {
   'Carro Forte Faculdade': ['carro forte faculdade', 'faculdade'],
 };
 
-// Palavras de ligação removidas antes de comparar
 const FILLER = new Set(['de', 'da', 'do', 'das', 'dos', 'a', 'o', 'as', 'os', 'e', 'em', 'no', 'na', 'num', 'numa']);
 
 function stripFiller(str) {
@@ -134,7 +132,7 @@ function resolverAcao(titulo) {
     return t.includes(na) || tStripped.includes(stripFiller(na));
   });
 
-  return direto ?? null; // não reconheceu = ignora no matching
+  return direto ?? null;
 }
 
 function extrairDataDoTitulo(titulo) {
@@ -241,19 +239,16 @@ async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
 
-  // Ignora não-ações (Sequestro, Comboio, etc.)
   if (!parsed.acao) {
     console.log(`⏭️  Ação não reconhecida, ignorando: "${msg.embeds?.[0]?.title ?? '(sem título)'}"`);
     return false;
   }
 
-  // Janela de 7 dias
   const agora    = new Date();
   const msgData  = new Date(msg.createdAt);
   const diffDias = (agora - msgData) / (1000 * 60 * 60 * 24);
   if (diffDias > 7) return false;
 
-  // Não duplica e não re-registra resolvidas
   if (pendencias.has(parsed.id)) return false;
   if (resolvidas.has(parsed.id)) return false;
 
@@ -294,7 +289,6 @@ const MATCH_THRESHOLD       = 0.38;
 const MIN_PILOTO_SCORE      = 0.20;
 const DATA_TOLERANCE_DIAS   = 7;
 
-// Remove prefixo #XXXX dos nomes de piloto pra comparação limpa
 function stripPilotoId(nome) {
   return (nome || '').replace(/^#\d+\s*/, '').trim();
 }
@@ -316,17 +310,14 @@ function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
       normalizar(pilotoLimpo).includes(primeiroNome) && primeiroNome.length > 2 ? 0.55 : 0,
     );
 
-    // Piloto tem que ter semelhança mínima
     if (scorePiloto < MIN_PILOTO_SCORE) continue;
 
-    // Se a ação do vídeo é conhecida, compara exatamente com a pendência
-    let scoreAcao = 0.5; // fallback se não tem ação no vídeo
+    let scoreAcao = 0.5;
     if (acaoVideo && p.acao) {
       const acaoPendencia = resolverAcao(p.acao) ?? p.acao;
       scoreAcao = normalizar(acaoVideo) === normalizar(acaoPendencia) ? 1.0 : 0.0;
     }
 
-    // Se a ação é conhecida mas não bateu, pula — não resolve ação errada
     if (acaoVideo && scoreAcao === 0) continue;
 
     const total = scorePiloto * 0.60 + scoreAcao * 0.25 + scoreData * 0.15;
@@ -362,13 +353,11 @@ client.on('error', (err) => console.error('Erro no client:', err.message));
 client.on('messageCreate', async (message) => {
   if (message.author.bot && message.channelId !== process.env.PENDENCIAS_CHANNEL_ID) return;
 
-  // ── Canal de pendências ───────────────────────────────────────────────────
   if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
     await registrarPendencia(message);
     return;
   }
 
-  // ── Canal de ações ────────────────────────────────────────────────────────
   if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
 
   const temLink    = URL_REGEX.test(message.content);
@@ -403,7 +392,6 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // Só tenta matching se a ação foi reconhecida
     const resolvida = acaoDoVideo
       ? tentarResolverPendencia(pilotoNome, timestampDoVideo, acaoDoVideo)
       : null;
@@ -465,7 +453,6 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  // Defer imediatamente antes de qualquer operação assíncrona
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   let threadData = threadSetupMsgs.get(interaction.channelId);
@@ -535,15 +522,6 @@ async function abrirSelects(interaction) {
           .setCustomId('sel_piloto')
           .setPlaceholder('3️⃣  Piloto analisado')
           .addOptions(pilotos)
-      ),
-      new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId('sel_atirador')
-          .setPlaceholder('4️⃣  Ação com Atirador?')
-          .addOptions([
-            { label: '🎯  Sim, com atirador', value: 'sim' },
-            { label: '❌   Não',              value: 'nao' },
-          ])
       ),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -622,7 +600,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── /resolver (aceita múltiplos IDs separados por vírgula) ────────────────
+  // ── /resolver ─────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
     const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
@@ -680,7 +658,6 @@ client.on('interactionCreate', async (interaction) => {
     if (!state) { await interaction.deferUpdate(); return; }
     if (interaction.customId === 'sel_resultado') state.resultado = interaction.values[0];
     if (interaction.customId === 'sel_acao')      state.acao      = interaction.values[0];
-    if (interaction.customId === 'sel_atirador')  state.atirador  = interaction.values[0] === 'sim';
     if (interaction.customId === 'sel_piloto') {
       const m = interaction.guild.members.cache.get(interaction.values[0]);
       state.pilotoId   = interaction.values[0];
@@ -694,56 +671,34 @@ client.on('interactionCreate', async (interaction) => {
   // ── Botão "Abrir formulário" ──────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
-    if (!state?.resultado || !state?.acao || !state?.pilotoNome || state.atirador === undefined) {
+    if (!state?.resultado || !state?.acao || !state?.pilotoNome) {
       await interaction.reply({
-        content: '⚠️ Selecione **resultado**, **ação**, **piloto** e se havia **atirador** antes de continuar.',
+        content: '⚠️ Selecione **resultado**, **ação** e **piloto** antes de continuar.',
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    if (state.atirador) {
-      const modal = new ModalBuilder().setCustomId('form_atirador_1').setTitle('Análise — Parte 1/2');
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('data').setLabel('Data').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 20/03/2026').setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('spots').setLabel('Spots').setStyle(TextInputStyle.Paragraph).setPlaceholder('Análise dos spots...').setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('calls').setLabel('Calls').setStyle(TextInputStyle.Paragraph).setPlaceholder('Análise das calls...').setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('angulos').setLabel('Ângulos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Análise dos ângulos...').setRequired(false)
-        ),
-      );
-      await interaction.showModal(modal);
-    } else {
-      const modal = new ModalBuilder().setCustomId('form_completo').setTitle('Análise da Ação');
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('data').setLabel('Data').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 20/03/2026').setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('spots').setLabel('Spots').setStyle(TextInputStyle.Paragraph).setPlaceholder('Análise dos spots...').setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('calls').setLabel('Calls').setStyle(TextInputStyle.Paragraph).setPlaceholder('Análise das calls...').setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('positivos').setLabel('Pontos Positivos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos positivos...').setRequired(false)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('negativos').setLabel('Pontos Negativos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos negativos...').setRequired(false)
-        ),
-      );
-      await interaction.showModal(modal);
-    }
+    const modal = new ModalBuilder().setCustomId('form_completo').setTitle('Análise da Ação');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('data').setLabel('Data').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 20/03/2026').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('positivos').setLabel('Pontos Positivos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos positivos...').setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('negativos').setLabel('Pontos Negativos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos negativos...').setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('melhorias').setLabel('Melhorias').setStyle(TextInputStyle.Paragraph).setPlaceholder('Sugestões de melhoria...').setRequired(false)
+      ),
+    );
+    await interaction.showModal(modal);
     return;
   }
 
-  // ── Modal completo (sem atirador) ─────────────────────────────────────────
+  // ── Modal completo ────────────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'form_completo') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const state = pending.get(interaction.user.id);
@@ -753,63 +708,9 @@ client.on('interactionCreate', async (interaction) => {
     await gerarEPostar(interaction, {
       ...state,
       data:      interaction.fields.getTextInputValue('data'),
-      spots:     interaction.fields.getTextInputValue('spots'),
-      calls:     interaction.fields.getTextInputValue('calls'),
-      melhorias: interaction.fields.getTextInputValue('positivos'),
+      positivos: interaction.fields.getTextInputValue('positivos'),
       negativos: interaction.fields.getTextInputValue('negativos'),
-    });
-    return;
-  }
-
-  // ── Modal atirador parte 1 ────────────────────────────────────────────────
-  if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_1') {
-    const state = pending.get(interaction.user.id) ?? {};
-    state.data    = interaction.fields.getTextInputValue('data');
-    state.spots   = interaction.fields.getTextInputValue('spots');
-    state.calls   = interaction.fields.getTextInputValue('calls');
-    state.angulos = interaction.fields.getTextInputValue('angulos');
-    pending.set(interaction.user.id, state);
-
-    await interaction.reply({
-      content: '**Parte 1 salva!** Clique abaixo para preencher o restante.',
-      components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('btn_parte2').setLabel('Continuar → Comportamento & Pontos').setStyle(ButtonStyle.Primary)
-      )],
-      flags: MessageFlags.Ephemeral,
-    });
-    return;
-  }
-
-  // ── Botão parte 2 ─────────────────────────────────────────────────────────
-  if (interaction.isButton() && interaction.customId === 'btn_parte2') {
-    const modal2 = new ModalBuilder().setCustomId('form_atirador_2').setTitle('Análise — Parte 2/2');
-    modal2.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('comportamento').setLabel('Comportamento Geral').setStyle(TextInputStyle.Paragraph).setPlaceholder('Comunicativo, reativo, etc...').setRequired(false)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('positivos').setLabel('Pontos Positivos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos positivos...').setRequired(false)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('negativos').setLabel('Pontos Negativos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos negativos...').setRequired(false)
-      ),
-    );
-    await interaction.showModal(modal2);
-    return;
-  }
-
-  // ── Modal atirador parte 2 ────────────────────────────────────────────────
-  if (interaction.isModalSubmit() && interaction.customId === 'form_atirador_2') {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const state = pending.get(interaction.user.id);
-    if (!state) { await interaction.editReply({ content: '❌ Sessão expirada. Inicie uma nova avaliação.' }); return; }
-    pending.delete(interaction.user.id);
-
-    await gerarEPostar(interaction, {
-      ...state,
-      comportamento: interaction.fields.getTextInputValue('comportamento'),
-      melhorias:     interaction.fields.getTextInputValue('positivos'),
-      negativos:     interaction.fields.getTextInputValue('negativos'),
+      melhorias: interaction.fields.getTextInputValue('melhorias'),
     });
     return;
   }
