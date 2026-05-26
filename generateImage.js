@@ -47,6 +47,8 @@ const C = {
   positivoBg:   '#0a1f10',
   negativo:     '#ef4444',
   negativoBg:   '#1a0808',
+  melhoria:     '#f59e0b',
+  melhoriaBg:   '#1a1408',
   neutro:       '#00b4d8',
   neutroBg:     '#071520',
 };
@@ -123,6 +125,7 @@ function fieldStyle(label) {
   const l = label.toUpperCase();
   if (l.includes('NEGATIVO')) return { bar: C.negativo, labelColor: C.negativo, bg: C.negativoBg };
   if (l.includes('POSITIVO')) return { bar: C.positivo, labelColor: C.positivo, bg: C.positivoBg };
+  if (l.includes('MELHORIA')) return { bar: C.melhoria, labelColor: C.melhoria, bg: C.melhoriaBg };
   return { bar: C.cyan, labelColor: C.cyan, bg: C.neutroBg };
 }
 
@@ -130,12 +133,9 @@ async function generateReportImage(dados) {
   await ensureFonts();
 
   const campos = [
-    { label: 'Spots',            valor: dados.spots },
-    { label: 'Calls',            valor: dados.calls },
-    { label: 'Ângulos',          valor: dados.angulos },
-    { label: 'Comportamento',    valor: dados.comportamento },
-    { label: 'Pontos Positivos', valor: dados.melhorias },
+    { label: 'Pontos Positivos', valor: dados.positivos },
     { label: 'Pontos Negativos', valor: dados.negativos },
+    { label: 'Melhorias',        valor: dados.melhorias },
   ].filter(c => c.valor && c.valor.trim());
 
   const tmp = createCanvas(W, 100);
