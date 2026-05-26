@@ -657,8 +657,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const total = pendencias.size;
+    for (const id of pendencias.keys()) resolvidas.add(id);
     pendencias.clear();
     savePendencias();
+    saveResolvidas();
 
     await interaction.reply({
       content: `🗑️ **${total} pendência(s) removida(s).** Lista limpa.`,
