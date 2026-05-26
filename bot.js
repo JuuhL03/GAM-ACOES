@@ -646,6 +646,29 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // ── /limpar_pendencias ──────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'limpar_pendencias') {
+    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+
+    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const total = pendencias.size;
+    pendencias.clear();
+    savePendencias();
+
+    await interaction.reply({
+      content: `🗑️ **${total} pendência(s) removida(s).** Lista limpa.`,
+      flags: MessageFlags.Ephemeral,
+    });
+
+    console.log(`🗑️  Pendências limpas: ${total} removida(s) (por ${interaction.user.tag})`);
+    return;
+  }
+
   // ── Botão iniciar avaliação ───────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'iniciar_avaliacao') {
     await abrirSelects(interaction);
