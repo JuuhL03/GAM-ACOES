@@ -98,9 +98,9 @@ const ACOES = [
 const ALIASES = {
   'Banco de Paleto':       ['paleto', 'banco paleto', 'paleto day', 'paleto bank', 'bank paleto'],
   'Fleeca Praia':          ['praia', 'fleeca praia', 'flecca praia', 'fleeca beach', 'praia fleeca', 'fleeca da praia'],
-  'Fleeca Shopping':       ['shopping', 'fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping'],
+  'Fleeca Shopping':       ['shopping', 'fleeca shopping', 'flecca shopping', 'shopping fleeca', 'fleeca do shopping', 'fleeca machado', 'flecca machado', 'machado'],
   'Fleeca 68':             ['68', 'fleeca 68', 'flecca 68', '68 fleeca'],
-  'Fleeca Chaves':         ['chaves', 'fleeca chaves', 'flecca chaves', 'chaves fleeca', 'fleeca machado', 'flecca machado', 'machado', 'gap'],
+  'Fleeca Chaves':         ['chaves', 'fleeca chaves', 'flecca chaves', 'chaves fleeca'],
   'Banco Central':         ['central', 'banco central', 'central bank'],
   'Nióbio Humane':         ['niobio', 'nióbio', 'humane', 'niobio humane', 'nióbio humane'],
   'Joalheria':             ['joalheria', 'jewelry', 'joia', 'joias'],
@@ -189,10 +189,11 @@ function limpar(str) {
 
 function parseEmbedPendencia(message) {
   const embed = message.embeds?.[0];
-  let acao = null, piloto = null, pilotoId = null, resultado = null, id = null;
+  let acao = null, piloto = null, pilotoId = null, resultado = null, id = null, tituloRaw = null;
 
   if (embed) {
-    acao      = resolverAcao(limpar(embed.title ?? '')) ?? null;
+    tituloRaw = limpar(embed.title ?? '') || null;
+    acao      = resolverAcao(tituloRaw) ?? null;
     resultado = limpar(embed.fields?.find(f => normalizar(f.name).includes('resultado'))?.value ?? '');
     id        = limpar(embed.footer?.text ?? '').replace(/^id[:\s]*/i, '').trim() || message.id;
 
@@ -215,12 +216,15 @@ function parseEmbedPendencia(message) {
       if (/^resultado[:\s]/i.test(line)) resultado = line.replace(/^resultado[:\s]*/i, '').trim();
       if (/^id[:\s]/i.test(line))        id        = line.replace(/^id[:\s]*/i, '').trim();
     }
-    if (!acao && lines.length > 0 && !lines[0].includes(':')) acao = resolverAcao(lines[0]);
+    if (!acao && lines.length > 0 && !lines[0].includes(':')) {
+      tituloRaw = lines[0];
+      acao = resolverAcao(tituloRaw);
+    }
     if (!id) id = message.id;
   }
 
-  if (!piloto && !pilotoId && !acao) return null;
-  return { piloto, pilotoId, acao, resultado: resultado || null, id: id ?? message.id };
+  if (!piloto && !pilotoId && !acao && !tituloRaw) return null;
+  return { piloto, pilotoId, acao: acao ?? tituloRaw, resultado: resultado || null, id: id ?? message.id };
 }
 
 // ── Helper: encontra membro no servidor ──────────────────────────────────────
@@ -238,11 +242,6 @@ function encontrarMembro(guild, nomePiloto, pilotoId) {
 async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
-
-  if (!parsed.acao) {
-    console.log(`⏭️  Ação não reconhecida, ignorando: "${msg.embeds?.[0]?.title ?? '(sem título)'}"`);
-    return false;
-  }
 
   const agora    = new Date();
   const msgData  = new Date(msg.createdAt);
