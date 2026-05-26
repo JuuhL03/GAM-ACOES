@@ -738,7 +738,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const membro = await interaction.guild.members.fetch(dmData.pilotoId);
       await membro.send({
-        content: `Segue o relatório da sua última ação em **${dmData.acao}** - ${dmData.data}. Qualquer dúvida, procure a liderança. <:gam:1470956318494953552>`,
+        content: `Segue o relatório da sua última ação em **${dmData.acao}** - ${dmData.data}.`,
         files: [dmData.imagePath],
       });
       await interaction.update({ content: `✅ Relatório postado e enviado por DM para **${dmData.pilotoNome}**!`, components: [] });
