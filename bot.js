@@ -96,6 +96,40 @@ async function verificarPermissao(userId) {
   return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 }
 
+// ── Helper: verifica se mensagem original já tem reação do bot ou de avaliador
+async function jaFoiAvaliada(messageId) {
+  if (!messageId || !process.env.THREAD_CHANNEL_ID) return false;
+  try {
+    const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
+    const msg   = await canal.messages.fetch(messageId).catch(() => null);
+    if (!msg) return false;
+    if (!msg.reactions.cache.size) return false;
+
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+
+    for (const reacao of msg.reactions.cache.values()) {
+      // Busca os usuários que reagiram (limite 10 — suficiente pro caso)
+      const usuarios = await reacao.users.fetch({ limit: 10 }).catch(() => null);
+      if (!usuarios) continue;
+
+      for (const [userId, user] of usuarios) {
+        // Reação do próprio bot
+        if (user.id === client.user.id) return true;
+
+        // Reação de alguém com cargo de avaliador
+        if (process.env.ALLOWED_ROLE_ID && guild) {
+          const membro = guild.members.cache.get(userId)
+            ?? await guild.members.fetch(userId).catch(() => null);
+          if (membro?.roles.cache.has(process.env.ALLOWED_ROLE_ID)) return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // ── Lista de ações + aliases ──────────────────────────────────────────────────
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -328,6 +362,14 @@ async function registrarPendencia(msg) {
 
   // Extrai data do conteúdo da mensagem para pré-preencher o modal depois
   const dataFormatada = extrairDataFormatadaDaMensagem(msg);
+
+  // Se a mensagem original já tem reação de avaliado, resolve direto sem registrar
+  if (await jaFoiAvaliada(msg.id)) {
+    resolvidas.add(parsed.id);
+    saveResolvidas();
+    console.log(`⏭️  Já avaliada (reação): ${parsed.piloto} — ${parsed.acao}`);
+    return false;
+  }
 
   pendencias.set(parsed.id, {
     piloto:        parsed.piloto,
@@ -1133,6 +1175,17 @@ client.on('interactionCreate', async (interaction) => {
           if (ok) importados++;
         }
       }
+
+      // Varre pendências em aberto e resolve as que já têm reação no canal
+      let autoResolvidas = 0;
+      for (const [id, p] of [...pendencias.entries()]) {
+        if (await jaFoiAvaliada(p.messageId)) {
+          resolverPendencia(id);
+          autoResolvidas++;
+          console.log(`⏭️  Auto-resolvida por reação: ${p.piloto} — ${p.acao}`);
+        }
+      }
+      if (autoResolvidas > 0) console.log(`✅ ${autoResolvidas} pendência(s) auto-resolvida(s) por reação`);
 
       const agora = new Date();
       const lista = [...pendencias.entries()]
