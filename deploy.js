@@ -1,10 +1,12 @@
 require('dotenv').config();
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
-const commands = [
+// Aparecem em DM e no servidor
+const globalCommands = [
   new SlashCommandBuilder()
     .setName('pendencias')
     .setDescription('Importa e lista as pendências de envio de vídeo dos últimos 7 dias (enviado por DM)')
+    .setDMPermission(true)
     .toJSON(),
   new SlashCommandBuilder()
     .setName('resolver')
@@ -14,14 +16,21 @@ const commands = [
         .setDescription('ID completo da pendência')
         .setRequired(true)
     )
+    .setDMPermission(true)
     .toJSON(),
   new SlashCommandBuilder()
     .setName('limpar_pendencias')
     .setDescription('Remove todas as pendências em aberto')
+    .setDMPermission(true)
     .toJSON(),
+];
+
+// Só no servidor, não aparece em DM
+const guildCommands = [
   new SlashCommandBuilder()
     .setName('enviar')
     .setDescription('Envia uma ação para avaliação, vinculando à pendência correspondente')
+    .setDMPermission(false)
     .toJSON(),
 ];
 
@@ -34,13 +43,15 @@ const GUILD_IDS = [
 
 (async () => {
   try {
-    // Limpa comandos globais (evita duplicatas)
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
-    console.log('🧹 Comandos globais limpos');
+    // Registra globalmente (DM + servidor)
+    console.log('Registrando globalmente...');
+    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: globalCommands });
+    console.log('✅ Global registrado');
 
+    // Registra /enviar só por servidor
     for (const guildId of GUILD_IDS) {
       console.log(`Registrando no servidor ${guildId}...`);
-      await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: commands });
+      await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: guildCommands });
       console.log(`✅ Servidor ${guildId} registrado`);
     }
 
