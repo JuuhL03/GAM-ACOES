@@ -963,9 +963,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    // Busca pendências do próprio piloto
+    // Busca pendências do próprio piloto ANTES de qualquer resposta
     const pilotoId   = interaction.user.id;
     const pilotoNome = member?.displayName ?? interaction.user.username;
     const agora      = new Date();
@@ -974,12 +972,12 @@ client.on('interactionCreate', async (interaction) => {
       .filter(([, p]) => {
         if (p.pilotoId !== pilotoId) return false;
         const dias = (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
-        return dias <= 14; // janela um pouco maior pra pilotos
+        return dias <= 14;
       })
       .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
 
     if (minhasPendencias.length === 0) {
-      // Sem pendências — abre modal pra preencher manualmente
+      // Sem pendências — modal tem que ser a PRIMEIRA resposta (sem defer antes)
       pendingEnvio.set(interaction.user.id, {
         pilotoId,
         pilotoNome,
@@ -1008,7 +1006,9 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Com pendências — mostra select
+    // Com pendências — aí sim pode defer e mostrar select
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const opcoes = minhasPendencias.slice(0, 25).map(([id, p]) => {
       const data  = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
       const label = `${p.acao ?? '—'} — ${data}${p.resultado ? ' (' + p.resultado + ')' : ''}`;
