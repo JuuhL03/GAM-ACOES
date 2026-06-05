@@ -371,6 +371,14 @@ async function registrarPendencia(msg) {
     return false;
   }
 
+  // Fallback: usa data de envio da mensagem quando não há data explícita no texto
+  const dataFinal = dataFormatada ?? (() => {
+    const d = new Date(msg.createdAt);
+    const dia = String(d.getDate()).padStart(2, '0');
+    const mes = String(d.getMonth() + 1).padStart(2, '0');
+    return `${dia}/${mes}/${d.getFullYear()}`;
+  })();
+
   pendencias.set(parsed.id, {
     piloto:        parsed.piloto,
     pilotoId:      parsed.pilotoId ?? null,
@@ -379,10 +387,10 @@ async function registrarPendencia(msg) {
     timestamp:     msg.createdAt.toISOString(),
     messageId:     msg.id,
     messageUrl:    msg.url,
-    dataFormatada: dataFormatada ?? null,
+    dataFormatada: dataFinal,
   });
   savePendencias();
-  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (data: ${dataFormatada ?? 'não encontrada'}) (total: ${pendencias.size})`);
+  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (data: ${dataFinal}${dataFormatada ? '' : ' [fallback envio]'}) (total: ${pendencias.size})`);
   return true;
 }
 
@@ -902,8 +910,10 @@ async function abrirSelects(interaction) {
   // Recupera threadData (sem defer ainda — pode precisar abrir modal)
   let threadData = threadSetupMsgs.get(interaction.channelId);
 
-  if (!threadData) {
-    console.log('⚠️  Dados não encontrados no cache, buscando na thread...');
+  // Entra no bloco de recovery se não tem threadData OU se tem mas sem preenchido
+  if (!threadData || !threadData.preenchido) {
+    if (!threadData) console.log('⚠️  Dados não encontrados no cache, buscando na thread...');
+    else console.log('⚠️  threadData sem preenchido, tentando recuperar da mensagem...');
     try {
       const thread        = interaction.channel;
       const starterMsg    = await thread.fetchStarterMessage().catch(() => null);
@@ -1332,7 +1342,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.update({
       content: `✅ **Selecionado:** ${acao} — ${data} (${resultado})
 
-Agora **envie o vídeo** respondendo a esta mensagem ou postando no canal de ações.`,
+Agora **envie o vídeo** aqui no canal de ações.`,
       components: [],
     });
 
@@ -1361,7 +1371,7 @@ Agora **envie o vídeo** respondendo a esta mensagem ou postando no canal de aç
     await interaction.reply({
       content: `✅ **Registrado:** ${state.acao} — ${state.data}${state.resultado ? ' (' + state.resultado + ')' : ''}
 
-Agora **envie o vídeo** neste canal.`,
+Agora **envie o vídeo** aqui no canal de ações.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
