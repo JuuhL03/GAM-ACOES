@@ -1314,72 +1314,38 @@ client.on('interactionCreate', async (interaction) => {
       if (lista.length === 0) {
         const msgVazia = `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
           (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '');
-        if (emDM) await interaction.editReply({ content: msgVazia });
-        else await interaction.user.send(msgVazia);
+        await interaction.user.send(msgVazia);
+        await interaction.editReply({ content: '✅ Verificado — nenhuma pendência em aberto!' });
         return;
       }
 
       const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` +
-        (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '');
+        (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
-      // Monta texto da lista
       const linhas = [cabecalho];
       for (const [id, p] of lista) {
-        const data = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
           `> **Piloto:** ${p.piloto ?? '—'}\n` +
           `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
-          `> **Data:** ${data} | 🔗 [Ver envio](${p.messageUrl})\n`
-        );
-      }
-      const textoLista = linhas.join('\n');
-
-      // Monta texto com separador entre pendências
-      const linhasTexto = [];
-      for (const [, p] of lista) {
-        const data = p.dataFormatada ?? '—';
-        linhasTexto.push(
-          `👤 ${p.piloto ?? '—'}\n` +
-          `⚔️  ${p.acao ?? '—'} | 📅 ${data} | ${p.resultado === 'Vitória' ? '✅' : p.resultado === 'Derrota' ? '❌' : '—'} ${p.resultado ?? '—'}\n` +
-          `🔗 ${p.messageUrl}`
+          `> **Registrado em:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
         );
       }
 
-      const cabecalhoTexto = `📋 **Pendências em aberto — ${lista.length} ação(ões)${importados > 0 ? ` (+${importados} importada(s))` : ''}**`;
-      const separador = '\n\n' + '─'.repeat(30) + '\n\n';
-      const corpo = linhasTexto.join(separador);
-
-      // Envia em chunks de 1900 chars mantendo pendências inteiras
-      const mensagens = [];
-      let buffer = cabecalhoTexto + '\n\n';
-      for (const bloco of linhasTexto) {
-        const linha = (mensagens.length === 0 && buffer === cabecalhoTexto + '\n\n' ? '' : '─'.repeat(30) + '\n\n') + bloco + '\n\n';
+      let buffer = '';
+      for (const linha of linhas) {
         if ((buffer + linha).length > 1900) {
-          mensagens.push(buffer.trimEnd());
-          buffer = bloco + '\n\n';
-        } else {
-          buffer += linha;
+          await interaction.user.send(buffer);
+          buffer = '';
         }
+        buffer += linha + '\n';
       }
-      if (buffer.trim()) mensagens.push(buffer.trimEnd());
-
-      if (emDM) {
-        await interaction.editReply({ content: mensagens[0] });
-        for (let i = 1; i < mensagens.length; i++) {
-          await interaction.followUp({ content: mensagens[i], flags: MessageFlags.Ephemeral });
-        }
-      } else {
-        for (const msg of mensagens) {
-          await interaction.user.send({ content: msg });
-        }
-      }
+      if (buffer.trim()) await interaction.user.send(buffer);
+      await interaction.editReply({ content: '✅ Lista enviada por DM!' });
 
     } catch (err) {
       console.error('❌ Erro em /pendencias:', err.message);
-      try {
-        if (emDM) await interaction.editReply({ content: '❌ Erro ao buscar pendências.' });
-        else await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
-      } catch { /* já respondido */ }
+      try { await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' }); } catch { /* já respondido */ }
     }
     return;
   }
