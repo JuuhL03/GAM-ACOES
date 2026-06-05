@@ -20,6 +20,10 @@ const commands = [
     .setName('limpar_pendencias')
     .setDescription('Remove todas as pendências em aberto')
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName('enviar')
+    .setDescription('Envia uma ação para avaliação, vinculando à pendência correspondente')
+    .toJSON(),
 ];
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 const GUILD_IDS = [
