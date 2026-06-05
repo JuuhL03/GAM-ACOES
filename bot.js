@@ -10,6 +10,7 @@ const {
   ButtonStyle,
   StringSelectMenuBuilder,
   MessageFlags,
+  EmbedBuilder,
 } = require('discord.js');
 const { generateReportImage } = require('./generateImage');
 const fs   = require('fs');
@@ -1323,28 +1324,45 @@ client.on('interactionCreate', async (interaction) => {
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '');
 
       // Monta texto da lista
-      const linhas = [];
+      const linhas = [cabecalho];
       for (const [id, p] of lista) {
         const data = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
-          `> **Piloto:** ${p.piloto ?? '—'} | **Ação:** ${p.acao ?? '—'} | **Data:** ${data} | **Resultado:** ${p.resultado ?? '—'} | 🔗 [Ver](${p.messageUrl})`
+          `> **Piloto:** ${p.piloto ?? '—'}\n` +
+          `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
+          `> **Data:** ${data} | 🔗 [Ver envio](${p.messageUrl})\n`
         );
       }
-      const textoLista = cabecalho + '\n\n' + linhas.join('\n');
+      const textoLista = linhas.join('\n');
 
-      // Envia só o texto — sem select (use /resolver pra resolver)
+      // Monta embed com fields — uma mensagem única independente do tamanho
+      const tituloEmbed = `📋 Pendências em aberto — ${lista.length} ação(ões)${importados > 0 ? ` (+${importados} importada(s))` : ''}`;
+
+      const embeds = [];
+      for (let i = 0; i < lista.length; i += 25) {
+        const chunk = lista.slice(i, i + 25);
+        const embed = new EmbedBuilder().setColor(0xE67E22);
+        if (i === 0) embed.setTitle(tituloEmbed);
+        for (const [, p] of chunk) {
+          const data = p.dataFormatada ?? '—';
+          embed.addFields({
+            name: p.piloto ?? '—',
+            value: `**Ação:** ${p.acao ?? '—'} | **Data:** ${data} | **Resultado:** ${p.resultado ?? '—'}\n🔗 [Ver envio](${p.messageUrl})`,
+            inline: false,
+          });
+        }
+        embeds.push(embed);
+      }
+
       if (emDM) {
-        if (textoLista.length > 1900) {
-          const partes = textoLista.match(/.{1,1900}/gs) ?? [textoLista];
-          await interaction.editReply({ content: partes[0] });
-          for (let i = 1; i < partes.length; i++) {
-            await interaction.followUp({ content: partes[i], flags: MessageFlags.Ephemeral });
-          }
-        } else {
-          await interaction.editReply({ content: textoLista });
+        await interaction.editReply({ content: '', embeds: [embeds[0]] });
+        for (let i = 1; i < embeds.length; i++) {
+          await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
         }
       } else {
-        await interaction.user.send({ content: textoLista });
+        for (const embed of embeds) {
+          await interaction.user.send({ embeds: [embed] });
+        }
       }
 
     } catch (err) {
