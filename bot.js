@@ -1172,7 +1172,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const emDM = !interaction.guild;
-    if (!emDM) await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
+    // Responde imediatamente para não estourar o timeout de 3s do Discord
+    await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
       let importados = 0;
@@ -1205,7 +1206,7 @@ client.on('interactionCreate', async (interaction) => {
       if (lista.length === 0) {
         const msgVazia = `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
           (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '');
-        if (emDM) await interaction.reply({ content: msgVazia });
+        if (emDM) await interaction.editReply({ content: msgVazia });
         else await interaction.user.send(msgVazia);
         return;
       }
@@ -1227,23 +1228,23 @@ client.on('interactionCreate', async (interaction) => {
       let primeiroEnvio = true;
       for (const linha of linhas) {
         if ((buffer + linha).length > 1900) {
-          if (emDM && primeiroEnvio) { await interaction.reply({ content: buffer }); primeiroEnvio = false; }
-          else if (emDM) { await interaction.followUp({ content: buffer }); }
+          if (emDM && primeiroEnvio) { await interaction.editReply({ content: buffer }); primeiroEnvio = false; }
+          else if (emDM) { await interaction.followUp({ content: buffer, flags: MessageFlags.Ephemeral }); }
           else await interaction.user.send(buffer);
           buffer = '';
         }
         buffer += linha + '\n';
       }
       if (buffer.trim()) {
-        if (emDM && primeiroEnvio) await interaction.reply({ content: buffer });
-        else if (emDM) await interaction.followUp({ content: buffer });
+        if (emDM && primeiroEnvio) await interaction.editReply({ content: buffer });
+        else if (emDM) await interaction.followUp({ content: buffer, flags: MessageFlags.Ephemeral });
         else await interaction.user.send(buffer);
       }
 
     } catch (err) {
       console.error('❌ Erro em /pendencias:', err.message);
       try {
-        if (emDM) await interaction.reply({ content: '❌ Erro ao buscar pendências.' });
+        if (emDM) await interaction.editReply({ content: '❌ Erro ao buscar pendências.' });
         else await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
       } catch { /* já respondido */ }
     }
