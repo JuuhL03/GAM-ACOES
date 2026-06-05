@@ -852,8 +852,7 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
+  // Recupera threadData (sem defer ainda — pode precisar abrir modal)
   let threadData = threadSetupMsgs.get(interaction.channelId);
 
   if (!threadData) {
@@ -882,6 +881,64 @@ async function abrirSelects(interaction) {
     }
   }
 
+  // Tenta encontrar pendência relacionada à thread para pré-preencher dados
+  const pendenciaDaThread = await encontrarPendenciaPorThread(interaction.channel);
+  if (pendenciaDaThread) {
+    console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao} (data: ${pendenciaDaThread.dataFormatada ?? '—'})`);
+  }
+
+  const preenchido = threadData?.preenchido ?? null;
+
+  const pilotoNomeFinal = preenchido?.pilotoNome ?? pendenciaDaThread?.piloto   ?? null;
+  const pilotoIdFinal   = preenchido?.pilotoId   ?? pendenciaDaThread?.pilotoId ?? null;
+  const acaoFinal       = preenchido?.acao       ?? pendenciaDaThread?.acao     ?? null;
+  const resultadoFinal  = preenchido?.resultado  ?? pendenciaDaThread?.resultado ?? null;
+  const dataFinal       = preenchido?.data       ?? pendenciaDaThread?.dataFormatada ?? null;
+
+  const temTudo = acaoFinal && resultadoFinal && pilotoNomeFinal;
+
+  if (temTudo) {
+    // Tem tudo — pula os selects e abre o modal direto
+    console.log(`⚡ Pulando selects — dados completos: ${pilotoNomeFinal} | ${acaoFinal} | ${resultadoFinal}`);
+
+    pending.set(interaction.user.id, {
+      channelId:     interaction.channelId,
+      setupMsgId:    threadData?.setupMsgId    ?? null,
+      originalMsgId: threadData?.originalMsgId ?? null,
+      pilotoNome:    pilotoNomeFinal,
+      pilotoId:      pilotoIdFinal,
+      acao:          acaoFinal,
+      resultado:     resultadoFinal,
+      dataFormatada: dataFinal,
+    });
+
+    const modal = new ModalBuilder().setCustomId('form_completo').setTitle('Análise da Ação');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('data').setLabel('Data').setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: 20/03/2026').setValue(dataFinal ?? '').setRequired(true)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('positivos').setLabel('Pontos Positivos')
+          .setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos positivos...').setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('negativos').setLabel('Pontos Negativos')
+          .setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos negativos...').setRequired(false)
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('melhorias').setLabel('Melhorias')
+          .setStyle(TextInputStyle.Paragraph).setPlaceholder('Sugestões de melhoria...').setRequired(false)
+      ),
+    );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // Não tem tudo — mostra selects normalmente
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   const role    = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
   const pilotos = role
     ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
@@ -892,25 +949,15 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  // Tenta encontrar pendência relacionada à thread para pré-preencher dados
-  const pendenciaDaThread = await encontrarPendenciaPorThread(interaction.channel);
-  if (pendenciaDaThread) {
-    console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao} (data: ${pendenciaDaThread.dataFormatada ?? '—'})`);
-  }
-
-  // Verifica se a thread foi criada via /enviar (com dados já preenchidos)
-  const preenchido = threadData?.preenchido ?? null;
-
   pending.set(interaction.user.id, {
     channelId:     interaction.channelId,
     setupMsgId:    threadData?.setupMsgId    ?? null,
     originalMsgId: threadData?.originalMsgId ?? null,
-    // Dados do /enviar têm prioridade; fallback para pendência da thread
-    pilotoNomePendencia: preenchido?.pilotoNome ?? pendenciaDaThread?.piloto   ?? null,
-    pilotoIdPendencia:   preenchido?.pilotoId   ?? pendenciaDaThread?.pilotoId ?? null,
-    acaoPendencia:       preenchido?.acao       ?? pendenciaDaThread?.acao     ?? null,
-    dataFormatada:       preenchido?.data       ?? pendenciaDaThread?.dataFormatada ?? null,
-    resultadoPendencia:  preenchido?.resultado  ?? pendenciaDaThread?.resultado ?? null,
+    pilotoNomePendencia: pilotoNomeFinal,
+    pilotoIdPendencia:   pilotoIdFinal,
+    acaoPendencia:       acaoFinal,
+    dataFormatada:       dataFinal,
+    resultadoPendencia:  resultadoFinal,
   });
 
   await interaction.editReply({
