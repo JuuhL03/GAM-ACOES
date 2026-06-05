@@ -89,6 +89,13 @@ function resolverPendencia(id) {
   saveResolvidas();
 }
 
+// ── Helper: verifica permissão (funciona em servidor e em DM) ────────────────
+async function verificarPermissao(userId) {
+  const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+  const member = await guild?.members.fetch(userId).catch(() => null);
+  return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+}
+
 // ── Lista de ações + aliases ──────────────────────────────────────────────────
 const ACOES = [
   'Fleeca Praia', 'Fleeca Shopping', 'Fleeca 68', 'Fleeca Chaves',
@@ -1107,15 +1114,13 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /pendencias ───────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
-    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
-
-    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+    if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
 
-    await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
+    const emDM = !interaction.guild;
+    if (!emDM) await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
       let importados = 0;
@@ -1135,10 +1140,10 @@ client.on('interactionCreate', async (interaction) => {
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
       if (lista.length === 0) {
-        await interaction.user.send(
-          `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
-          (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '')
-        );
+        const msgVazia = `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
+          (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '');
+        if (emDM) await interaction.reply({ content: msgVazia });
+        else await interaction.user.send(msgVazia);
         return;
       }
 
@@ -1156,25 +1161,35 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       let buffer = '';
+      let primeiroEnvio = true;
       for (const linha of linhas) {
-        if ((buffer + linha).length > 1900) { await interaction.user.send(buffer); buffer = ''; }
+        if ((buffer + linha).length > 1900) {
+          if (emDM && primeiroEnvio) { await interaction.reply({ content: buffer }); primeiroEnvio = false; }
+          else if (emDM) { await interaction.followUp({ content: buffer }); }
+          else await interaction.user.send(buffer);
+          buffer = '';
+        }
         buffer += linha + '\n';
       }
-      if (buffer.trim()) await interaction.user.send(buffer);
+      if (buffer.trim()) {
+        if (emDM && primeiroEnvio) await interaction.reply({ content: buffer });
+        else if (emDM) await interaction.followUp({ content: buffer });
+        else await interaction.user.send(buffer);
+      }
 
     } catch (err) {
       console.error('❌ Erro em /pendencias:', err.message);
-      await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
+      try {
+        if (emDM) await interaction.reply({ content: '❌ Erro ao buscar pendências.' });
+        else await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' });
+      } catch { /* já respondido */ }
     }
     return;
   }
 
   // ── /resolver ─────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
-    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
-
-    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+    if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
@@ -1217,10 +1232,7 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /limpar_pendencias ──────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'limpar_pendencias') {
-    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
-
-    if (!member || !member.roles.cache.has(process.env.ALLOWED_ROLE_ID)) {
+    if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
