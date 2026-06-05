@@ -227,6 +227,53 @@ function parseEmbedPendencia(message) {
   return { piloto, pilotoId, acao: acao ?? tituloRaw, resultado: resultado || null, id: id ?? message.id };
 }
 
+// ── Helper: extrai data formatada do conteúdo da mensagem ────────────────────
+function extrairDataFormatadaDaMensagem(message) {
+  // Tenta extrair padrão "Data: DD/MM/AA" ou "Data: DD/MM/AAAA" do conteúdo ou campos do embed
+  const fontes = [];
+
+  if (message.embeds?.[0]) {
+    const embed = message.embeds[0];
+    if (embed.description) fontes.push(embed.description);
+    for (const field of (embed.fields ?? [])) {
+      fontes.push(field.name, field.value);
+    }
+  }
+  if (message.content) fontes.push(message.content);
+
+  for (const texto of fontes) {
+    if (!texto) continue;
+    // Busca "Data: 31/05/26" ou "Data: 31/05/2026"
+    const match = texto.match(/data[:\s]+(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/i);
+    if (match) {
+      const dia = match[1].padStart(2, '0');
+      const mes = match[2].padStart(2, '0');
+      const anoRaw = match[3];
+      const ano = anoRaw
+        ? (parseInt(anoRaw) < 100 ? 2000 + parseInt(anoRaw) : parseInt(anoRaw))
+        : new Date().getFullYear();
+      return `${dia}/${mes}/${ano}`;
+    }
+  }
+
+  // Fallback: qualquer data sozinha no texto
+  for (const texto of fontes) {
+    if (!texto) continue;
+    const match = texto.match(/(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/);
+    if (match) {
+      const dia = match[1].padStart(2, '0');
+      const mes = match[2].padStart(2, '0');
+      const anoRaw = match[3];
+      const ano = anoRaw
+        ? (parseInt(anoRaw) < 100 ? 2000 + parseInt(anoRaw) : parseInt(anoRaw))
+        : new Date().getFullYear();
+      return `${dia}/${mes}/${ano}`;
+    }
+  }
+
+  return null;
+}
+
 // ── Helper: encontra membro no servidor ──────────────────────────────────────
 function encontrarMembro(guild, nomePiloto, pilotoId) {
   if (pilotoId) return guild.members.cache.get(pilotoId) ?? null;
@@ -267,19 +314,25 @@ async function registrarPendencia(msg) {
     if (temAvaliador) { console.log(`⏭️  Avaliador isento: ${nomeReal}`); return false; }
     if (!temPiloto)   { console.log(`⏭️  Sem cargo de piloto: ${nomeReal}`); return false; }
 
-    parsed.piloto = nomeReal;
+    parsed.piloto   = nomeReal;
+    parsed.pilotoId = membro.id;
   }
 
+  // Extrai data do conteúdo da mensagem para pré-preencher o modal depois
+  const dataFormatada = extrairDataFormatadaDaMensagem(msg);
+
   pendencias.set(parsed.id, {
-    piloto:     parsed.piloto,
-    acao:       parsed.acao,
-    resultado:  parsed.resultado,
-    timestamp:  msg.createdAt.toISOString(),
-    messageId:  msg.id,
-    messageUrl: msg.url,
+    piloto:        parsed.piloto,
+    pilotoId:      parsed.pilotoId ?? null,
+    acao:          parsed.acao,
+    resultado:     parsed.resultado,
+    timestamp:     msg.createdAt.toISOString(),
+    messageId:     msg.id,
+    messageUrl:    msg.url,
+    dataFormatada: dataFormatada ?? null,
   });
   savePendencias();
-  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (total: ${pendencias.size})`);
+  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (data: ${dataFormatada ?? 'não encontrada'}) (total: ${pendencias.size})`);
   return true;
 }
 
@@ -330,6 +383,160 @@ function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
   return null;
 }
 
+// ── Helper: tenta encontrar pendência relacionada à thread ───────────────────
+function encontrarPendenciaDaThread(threadId) {
+  // Busca a pendência mais recente cujo piloto seja o dono da thread
+  // A thread se chama "Avaliação — <displayName>", mas aqui só temos o threadId.
+  // Retornamos a pendência mais recente em aberto — o avaliador pode sobrescrever pelo select.
+  const lista = [...pendencias.entries()]
+    .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+  if (lista.length === 0) return null;
+  return lista[0][1]; // pendência mais recente
+}
+
+// ── Parser de mensagem de piloto (formato livre, sem embed) ──────────────────
+// Suporta formatos como:
+//   AÇÃO: `BANCO FLEECA DA PRAIA "no tiro"` ... DATA: `30/05/2026`
+//   Ação: Fleeca Shopping (Vitória) Data: 03/06/26
+function parseMensagemPiloto(message) {
+  const texto = message.content;
+  if (!texto) return null;
+
+  // Extrai campos chave:valor (com ou sem backticks, case-insensitive)
+  // Ex: AÇÃO: `valor` ou Ação: valor
+  function extrairCampo(chaves) {
+    for (const chave of chaves) {
+      const re = new RegExp(chave + '[:\\s]+`?([^`\\n]+)`?', 'i');
+      const m  = texto.match(re);
+      if (m) return m[1].trim();
+    }
+    return null;
+  }
+
+  const acaoRaw    = extrairCampo(['a[çc][aã]o', 'acao', 'ação']);
+  const dataRaw    = extrairCampo(['data']);
+
+  if (!acaoRaw && !dataRaw) return null; // não parece ser esse formato
+
+  // Extrai resultado da ação — "(Vitória)", "(Derrota)", "no tiro", etc.
+  let resultado = null;
+  if (acaoRaw) {
+    const mVit  = acaoRaw.match(/\(?(vit[oó]ria|ganhou|win)\)?/i);
+    const mDer  = acaoRaw.match(/\(?(derrota|perdeu|loss|no tiro)\)?/i);
+    if (mVit)      resultado = 'Vitória';
+    else if (mDer) resultado = 'Derrota';
+  }
+
+  // Limpa a ação removendo o resultado entre parênteses
+  const acaoLimpa = acaoRaw
+    ? acaoRaw.replace(/\s*\([^)]*\)\s*/g, '').replace(/["']/g, '').trim()
+    : null;
+
+  const acao = resolverAcao(acaoLimpa ?? acaoRaw) ?? acaoLimpa ?? acaoRaw;
+
+  // Formata data para DD/MM/AAAA
+  let dataFormatada = null;
+  if (dataRaw) {
+    const m = dataRaw.match(/(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/);
+    if (m) {
+      const dia    = m[1].padStart(2, '0');
+      const mes    = m[2].padStart(2, '0');
+      const anoRaw = m[3];
+      const ano    = anoRaw
+        ? (parseInt(anoRaw) < 100 ? 2000 + parseInt(anoRaw) : parseInt(anoRaw))
+        : new Date().getFullYear();
+      dataFormatada = `${dia}/${mes}/${ano}`;
+    }
+  }
+
+  // Piloto vem do próprio autor da mensagem
+  const pilotoNome = message.member?.displayName ?? message.author.username;
+  const pilotoId   = message.member?.id ?? message.author.id;
+
+  return {
+    piloto:        pilotoNome,
+    pilotoId,
+    acao,
+    resultado,
+    dataFormatada,
+    id:            message.id,
+  };
+}
+
+// ── Busca resultado nas pendências do canal de bot (ação + piloto + data) ────
+async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
+  if (!process.env.PENDENCIAS_CHANNEL_ID) return null;
+
+  try {
+    const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
+    const msgs  = await canal.messages.fetch({ limit: 100 });
+
+    let melhorResultado = null;
+    let melhorScore     = 0;
+
+    for (const [, msg] of msgs) {
+      if (!msg.author.bot) continue;
+
+      const parsed = parseEmbedPendencia(msg);
+      if (!parsed?.resultado) continue;
+
+      // Score por ação
+      const acaoParsed  = resolverAcao(parsed.acao) ?? parsed.acao ?? '';
+      const acaoBusca   = resolverAcao(acao) ?? acao ?? '';
+      const scoreAcao   = normalizar(acaoParsed) === normalizar(acaoBusca) ? 1.0
+                        : dice(normalizar(acaoParsed), normalizar(acaoBusca));
+      if (scoreAcao < 0.5) continue;
+
+      // Score por piloto
+      const scorePiloto = dice(normalizar(stripPilotoId(parsed.piloto ?? '')), normalizar(stripPilotoId(pilotoNome ?? '')));
+      if (scorePiloto < 0.3) continue;
+
+      // Score por data (opcional — se tiver data nas duas pontas compara, senão ignora)
+      let scoreData = 0.5;
+      if (dataFormatada && parsed.acao) {
+        const dataMsg = extrairDataFormatadaDaMensagem(msg);
+        if (dataMsg) {
+          scoreData = dataMsg === dataFormatada ? 1.0 : 0.2;
+        }
+      }
+
+      const total = scoreAcao * 0.50 + scorePiloto * 0.35 + scoreData * 0.15;
+      if (total > melhorScore) {
+        melhorScore     = total;
+        melhorResultado = parsed.resultado;
+      }
+    }
+
+    if (melhorScore >= 0.55 && melhorResultado) {
+      console.log(`🔍 Resultado encontrado nas pendências: "${melhorResultado}" (score: ${Math.round(melhorScore * 100)}%)`);
+      return melhorResultado;
+    }
+  } catch (err) {
+    console.warn('⚠️  Erro ao buscar resultado nas pendências:', err.message);
+  }
+
+  return null;
+}
+
+// ── Helper: tenta encontrar pendência pelo nome do piloto da thread ──────────
+async function encontrarPendenciaPorThread(thread) {
+  // O nome da thread é "Avaliação — <displayName>"
+  const match = thread.name?.match(/^Avalia[çc][aã]o\s*[—\-]\s*(.+)$/i);
+  if (!match) return null;
+
+  const nomePilotoThread = normalizar(match[1].trim());
+
+  // Procura pendência cujo piloto bate com o nome da thread
+  let melhor = null, melhorScore = 0;
+  for (const [, p] of pendencias.entries()) {
+    if (!p.piloto) continue;
+    const score = dice(normalizar(p.piloto), nomePilotoThread);
+    if (score > melhorScore) { melhorScore = score; melhor = p; }
+  }
+
+  return melhorScore >= 0.5 ? melhor : null;
+}
+
 // ── Ready ─────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
@@ -359,9 +566,54 @@ client.on('messageCreate', async (message) => {
 
   if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
 
+  // Mensagens de piloto sem link/arquivo — tenta registrar como pendência pelo formato livre
   const temLink    = URL_REGEX.test(message.content);
   const temArquivo = message.attachments.size > 0;
-  if (!temLink && !temArquivo) return;
+  if (!temLink && !temArquivo) {
+    const parsedPiloto = parseMensagemPiloto(message);
+    if (parsedPiloto) {
+      // Verifica cargo de piloto antes de registrar
+      const guild  = message.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
+      const membro = guild?.members.cache.get(parsedPiloto.pilotoId);
+      const temPilotoCargo    = membro?.roles.cache.has(process.env.PILOT_ROLE_ID);
+      const temAvaliadorCargo = membro?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+
+      if (temAvaliadorCargo) {
+        console.log(`⏭️  Mensagem de avaliador ignorada: ${parsedPiloto.piloto}`);
+        return;
+      }
+      if (process.env.PILOT_ROLE_ID && !temPilotoCargo) {
+        console.log(`⏭️  Sem cargo de piloto: ${parsedPiloto.piloto}`);
+        return;
+      }
+
+      if (!pendencias.has(parsedPiloto.id) && !resolvidas.has(parsedPiloto.id)) {
+        // Se não extraiu resultado do texto, tenta buscar nas pendências do canal de bot
+        let resultado = parsedPiloto.resultado;
+        if (!resultado) {
+          resultado = await buscarResultadoNasPendencias(
+            parsedPiloto.acao,
+            parsedPiloto.piloto,
+            parsedPiloto.dataFormatada,
+          ) ?? null;
+        }
+
+        pendencias.set(parsedPiloto.id, {
+          piloto:        parsedPiloto.piloto,
+          pilotoId:      parsedPiloto.pilotoId,
+          acao:          parsedPiloto.acao,
+          resultado,
+          timestamp:     message.createdAt.toISOString(),
+          messageId:     message.id,
+          messageUrl:    message.url,
+          dataFormatada: parsedPiloto.dataFormatada ?? null,
+        });
+        savePendencias();
+        console.log(`📋 Pendência (piloto) registrada: ${parsedPiloto.piloto} — ${parsedPiloto.acao} | resultado: ${resultado ?? '—'} (data: ${parsedPiloto.dataFormatada ?? '—'})`);
+      }
+    }
+    return;
+  }
 
   try {
     const pilotoNome = message.member?.displayName ?? message.author.username;
@@ -492,10 +744,21 @@ async function abrirSelects(interaction) {
     return;
   }
 
+  // Tenta encontrar pendência relacionada à thread para pré-preencher dados
+  const pendenciaDaThread = await encontrarPendenciaPorThread(interaction.channel);
+  if (pendenciaDaThread) {
+    console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao} (data: ${pendenciaDaThread.dataFormatada ?? '—'})`);
+  }
+
   pending.set(interaction.user.id, {
     channelId:     interaction.channelId,
     setupMsgId:    threadData?.setupMsgId    ?? null,
     originalMsgId: threadData?.originalMsgId ?? null,
+    // Dados da pendência para fallback e pré-preenchimento
+    pilotoNomePendencia: pendenciaDaThread?.piloto   ?? null,
+    pilotoIdPendencia:   pendenciaDaThread?.pilotoId ?? null,
+    acaoPendencia:       pendenciaDaThread?.acao     ?? null,
+    dataFormatada:       pendenciaDaThread?.dataFormatada ?? null,
   });
 
   await interaction.editReply({
@@ -695,9 +958,24 @@ client.on('interactionCreate', async (interaction) => {
   // ── Botão "Abrir formulário" ──────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
-    if (!state?.resultado || !state?.acao || !state?.pilotoNome) {
+    if (!state?.resultado || !state?.acao) {
       await interaction.reply({
-        content: '⚠️ Selecione **resultado**, **ação** e **piloto** antes de continuar.',
+        content: '⚠️ Selecione **resultado** e **ação** antes de continuar.',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    // Fallback: se avaliador não selecionou piloto no select, usa o da pendência
+    if (!state.pilotoNome && state.pilotoNomePendencia) {
+      state.pilotoNome = state.pilotoNomePendencia;
+      state.pilotoId   = state.pilotoIdPendencia ?? null;
+      console.log(`🔄 Piloto preenchido via fallback de pendência: ${state.pilotoNome}`);
+    }
+
+    if (!state.pilotoNome) {
+      await interaction.reply({
+        content: '⚠️ Selecione o **piloto** antes de continuar.',
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -706,7 +984,13 @@ client.on('interactionCreate', async (interaction) => {
     const modal = new ModalBuilder().setCustomId('form_completo').setTitle('Análise da Ação');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId('data').setLabel('Data').setStyle(TextInputStyle.Short).setPlaceholder('Ex: 20/03/2026').setRequired(true)
+        new TextInputBuilder()
+          .setCustomId('data')
+          .setLabel('Data')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: 20/03/2026')
+          .setValue(state.dataFormatada ?? '')   // ← pré-preenchido
+          .setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('positivos').setLabel('Pontos Positivos').setStyle(TextInputStyle.Paragraph).setPlaceholder('Pontos positivos...').setRequired(false)
