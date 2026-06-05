@@ -10,7 +10,6 @@ const {
   ButtonStyle,
   StringSelectMenuBuilder,
   MessageFlags,
-  EmbedBuilder,
 } = require('discord.js');
 const { generateReportImage } = require('./generateImage');
 const fs   = require('fs');
@@ -1335,33 +1334,43 @@ client.on('interactionCreate', async (interaction) => {
       }
       const textoLista = linhas.join('\n');
 
-      // Monta embed com fields — uma mensagem única independente do tamanho
-      const tituloEmbed = `📋 Pendências em aberto — ${lista.length} ação(ões)${importados > 0 ? ` (+${importados} importada(s))` : ''}`;
-
-      const embeds = [];
-      for (let i = 0; i < lista.length; i += 25) {
-        const chunk = lista.slice(i, i + 25);
-        const embed = new EmbedBuilder().setColor(0xE67E22);
-        if (i === 0) embed.setTitle(tituloEmbed);
-        for (const [, p] of chunk) {
-          const data = p.dataFormatada ?? '—';
-          embed.addFields({
-            name: p.piloto ?? '—',
-            value: `**Ação:** ${p.acao ?? '—'} | **Data:** ${data} | **Resultado:** ${p.resultado ?? '—'}\n🔗 [Ver envio](${p.messageUrl})`,
-            inline: false,
-          });
-        }
-        embeds.push(embed);
+      // Monta texto com separador entre pendências
+      const linhasTexto = [];
+      for (const [, p] of lista) {
+        const data = p.dataFormatada ?? '—';
+        linhasTexto.push(
+          `👤 ${p.piloto ?? '—'}\n` +
+          `⚔️  ${p.acao ?? '—'} | 📅 ${data} | ${p.resultado === 'Vitória' ? '✅' : p.resultado === 'Derrota' ? '❌' : '—'} ${p.resultado ?? '—'}\n` +
+          `🔗 ${p.messageUrl}`
+        );
       }
 
+      const cabecalhoTexto = `📋 **Pendências em aberto — ${lista.length} ação(ões)${importados > 0 ? ` (+${importados} importada(s))` : ''}**`;
+      const separador = '\n\n' + '─'.repeat(30) + '\n\n';
+      const corpo = linhasTexto.join(separador);
+
+      // Envia em chunks de 1900 chars mantendo pendências inteiras
+      const mensagens = [];
+      let buffer = cabecalhoTexto + '\n\n';
+      for (const bloco of linhasTexto) {
+        const linha = (mensagens.length === 0 && buffer === cabecalhoTexto + '\n\n' ? '' : '─'.repeat(30) + '\n\n') + bloco + '\n\n';
+        if ((buffer + linha).length > 1900) {
+          mensagens.push(buffer.trimEnd());
+          buffer = bloco + '\n\n';
+        } else {
+          buffer += linha;
+        }
+      }
+      if (buffer.trim()) mensagens.push(buffer.trimEnd());
+
       if (emDM) {
-        await interaction.editReply({ content: '', embeds: [embeds[0]] });
-        for (let i = 1; i < embeds.length; i++) {
-          await interaction.followUp({ embeds: [embeds[i]], flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: mensagens[0] });
+        for (let i = 1; i < mensagens.length; i++) {
+          await interaction.followUp({ content: mensagens[i], flags: MessageFlags.Ephemeral });
         }
       } else {
-        for (const embed of embeds) {
-          await interaction.user.send({ embeds: [embed] });
+        for (const msg of mensagens) {
+          await interaction.user.send({ content: msg });
         }
       }
 
