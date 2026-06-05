@@ -740,9 +740,146 @@ client.once('ready', async () => {
       console.log(`✅ Cache carregado: ${mainGuild.name}`);
     } catch (e) { console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message); }
   }
+
+  loadLembretes();
+
+  // Verifica lembretes a cada hora
+  setInterval(verificarLembretes, 60 * 60 * 1000);
+  // Roda uma vez logo no startup (após 1 min para dar tempo do cache carregar)
+  setTimeout(verificarLembretes, 60 * 1000);
+  console.log('⏰ Sistema de lembretes iniciado.');
 });
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
+
+// ── Sistema de lembretes de pendência ─────────────────────────────────────────
+// Roda a cada hora, manda DM pro piloto se a pendência tiver 24h+ sem resolver
+// e DM pro avaliador se o piloto postou vídeo mas não deu match
+
+const lembretes = new Map(); // pendenciaId -> { ultimoLembrete, avisoAvaliador }
+
+function loadLembretes() {
+  const LEMBRETES_PATH = path.join(DATA_DIR, 'lembretes.json');
+  if (fs.existsSync(LEMBRETES_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(LEMBRETES_PATH, 'utf8'));
+      for (const [k, v] of Object.entries(data)) lembretes.set(k, v);
+      console.log(`⏰ ${lembretes.size} lembrete(s) carregado(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar lembretes.json:', e.message); }
+  }
+}
+
+function saveLembretes() {
+  const LEMBRETES_PATH = path.join(DATA_DIR, 'lembretes.json');
+  const obj = {};
+  for (const [k, v] of lembretes.entries()) obj[k] = v;
+  fs.writeFileSync(LEMBRETES_PATH, JSON.stringify(obj, null, 2));
+}
+
+async function verificarLembretes() {
+  const agora    = new Date();
+  const guild    = client.guilds.cache.get(process.env.GUILD_ID);
+  const canalUrl = process.env.THREAD_CHANNEL_ID
+    ? `https://discord.com/channels/${process.env.GUILD_ID}/${process.env.THREAD_CHANNEL_ID}`
+    : null;
+
+  for (const [id, p] of pendencias.entries()) {
+    const diffHoras = (agora - new Date(p.timestamp)) / (1000 * 60 * 60);
+    const diffDias  = diffHoras / 24;
+
+    // Fora da janela de 7 dias — ignora
+    if (diffDias > 7) continue;
+
+    // Menos de 24h — ainda não precisa lembrar
+    if (diffHoras < 24) continue;
+
+    const estado = lembretes.get(id) ?? { ultimoLembrete: null, avisoAvaliador: false };
+
+    // Verifica se já passou 24h desde o último lembrete
+    const horasDesdeUltimo = estado.ultimoLembrete
+      ? (agora - new Date(estado.ultimoLembrete)) / (1000 * 60 * 60)
+      : 999;
+
+    if (horasDesdeUltimo < 24) continue;
+
+    // Tenta mandar DM pro piloto
+    if (p.pilotoId) {
+      try {
+        const membro = guild?.members.cache.get(p.pilotoId)
+          ?? await guild?.members.fetch(p.pilotoId).catch(() => null);
+
+        if (membro) {
+          const msg =
+            `⏰ **Lembrete de ação pendente!**
+
+` +
+            `Você ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).
+` +
+            (canalUrl ? `
+Poste no canal: ${canalUrl}` : '');
+
+          await membro.send(msg);
+          console.log(`⏰ Lembrete enviado: ${p.piloto} — ${p.acao}`);
+
+          estado.ultimoLembrete = agora.toISOString();
+          lembretes.set(id, estado);
+          saveLembretes();
+        }
+      } catch (err) {
+        console.warn(`⚠️  Lembrete falhou para ${p.piloto}:`, err.message);
+      }
+    }
+
+    // Verifica se o piloto já postou vídeo mas não deu match (thread existe mas pendência continua)
+    if (!estado.avisoAvaliador && p.pilotoId && diffDias >= 2) {
+      try {
+        const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID).catch(() => null);
+        if (canal) {
+          const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
+          const temVideo = msgs?.some(m =>
+            m.author.id === p.pilotoId &&
+            (URL_REGEX.test(m.content) || m.attachments.size > 0) &&
+            Math.abs(new Date(m.createdAt) - new Date(p.timestamp)) / (1000 * 60 * 60 * 24) <= 7
+          );
+
+          if (temVideo) {
+            // Piloto postou mas não deu match — avisa avaliador
+            const role = guild?.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+            if (role) {
+              for (const [, avaliador] of role.members) {
+                if (avaliador.user.bot) continue;
+                try {
+                  await avaliador.send(
+                    `⚠️ **Validação manual necessária!**
+
+` +
+                    `O piloto **${p.piloto ?? '—'}** postou um vídeo mas a pendência **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}) não foi resolvida automaticamente.
+` +
+                    `ID da pendência: \`${id}\`
+` +
+                    `Use /resolver para marcar como resolvida se já foi avaliada.`
+                  );
+                } catch { /* DM fechada */ }
+              }
+              console.log(`⚠️  Aviso enviado aos avaliadores: ${p.piloto} — ${p.acao}`);
+            }
+            estado.avisoAvaliador = true;
+            lembretes.set(id, estado);
+            saveLembretes();
+          }
+        }
+      } catch (err) {
+        console.warn('⚠️  Erro ao verificar vídeo postado:', err.message);
+      }
+    }
+  }
+
+  // Limpa lembretes de pendências já resolvidas
+  for (const id of lembretes.keys()) {
+    if (!pendencias.has(id)) lembretes.delete(id);
+  }
+  saveLembretes();
+}
 
 // ── Mensagens ─────────────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
