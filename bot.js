@@ -1322,11 +1322,11 @@ client.on('interactionCreate', async (interaction) => {
 
       const linhas = [cabecalho];
       for (const [id, p] of lista) {
-        const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        const data = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
           `> **Piloto:** ${p.piloto ?? '—'}\n` +
           `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
-          `> **Registrado em:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
+          `> **Data:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
         );
       }
 
@@ -1403,7 +1403,9 @@ client.on('interactionCreate', async (interaction) => {
 
     const components = grupos.map((grupo, idx) => {
       const opcoes = grupo.map(([id, p]) => {
-        const data  = p.dataFormatada ?? '—';
+        const data  = p.dataFormatada
+          ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+          ?? '—';
         const label = `${p.piloto ?? '—'} — ${p.acao ?? '—'} (${data})`.slice(0, 100);
         return { label, value: id };
       });
