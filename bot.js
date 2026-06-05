@@ -25,6 +25,7 @@ const client = new Client({
 });
 
 const pending         = new Map();
+const pendingEnvio    = new Map(); // estado do /enviar por piloto
 const pendingDM       = new Map();
 const threadSetupMsgs = new Map();
 const pendencias      = new Map();
@@ -615,6 +616,84 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // Captura vídeo do piloto após /enviar
+  if (temLink || temArquivo) {
+    const authorId   = message.author.id;
+    const envioState = pendingEnvio.get(authorId);
+    if (envioState?.aguardandoVideo) {
+      pendingEnvio.delete(authorId);
+
+      const pilotoNome = envioState.pilotoNome;
+      const pilotoId   = envioState.pilotoId;
+
+      try {
+        // Resolve pendência vinculada (se veio de um select)
+        if (envioState.pendenciaId && pendencias.has(envioState.pendenciaId)) {
+          resolverPendencia(envioState.pendenciaId);
+          console.log(`✅ Pendência resolvida via /enviar: ${envioState.acao}`);
+        }
+
+        const thread = await message.startThread({
+          name: `Avaliação — ${pilotoNome}`,
+          autoArchiveDuration: 1440,
+        });
+
+        const botao = new ButtonBuilder()
+          .setCustomId('iniciar_avaliacao')
+          .setLabel('📋  Iniciar Avaliação')
+          .setStyle(ButtonStyle.Primary);
+
+        const conteudo =
+          `## 📋 Avaliação de Piloto
+` +
+          `> **Piloto:** ${pilotoNome}
+` +
+          `> **Ação:** ${envioState.acao ?? '—'} | **Resultado:** ${envioState.resultado ?? '—'} | **Data:** ${envioState.data ?? '—'}
+
+` +
+          `Clique no botão abaixo para iniciar a avaliação.`;
+
+        const setupMsg = await thread.send({
+          content: conteudo,
+          components: [new ActionRowBuilder().addComponents(botao)],
+        });
+
+        // Salva na thread os dados pré-preenchidos do /enviar
+        threadSetupMsgs.set(thread.id, {
+          setupMsgId:    setupMsg.id,
+          originalMsgId: message.id,
+          preenchido: {
+            pilotoId,
+            pilotoNome,
+            acao:      envioState.acao,
+            resultado: envioState.resultado,
+            data:      envioState.data,
+          },
+        });
+        saveThreads();
+        console.log(`✅ Thread criada via /enviar para ${pilotoNome}`);
+
+        const guild       = message.guild;
+        const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+        if (allowedRole) {
+          const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
+          const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**
+
+**Postado por:** ${pilotoNome}
+**Acesse a thread:** ${threadLink}`;
+          for (const [, member] of allowedRole.members) {
+            if (member.user.bot) continue;
+            try { await member.send(dmTexto); }
+            catch { console.warn(`⚠️  DM falhou para ${member.displayName}`); }
+          }
+        }
+      } catch (err) {
+        console.error('❌ Erro ao processar /enviar vídeo:', err.message);
+      }
+      return;
+    }
+  }
+
   try {
     const pilotoNome = message.member?.displayName ?? message.author.username;
 
@@ -750,15 +829,19 @@ async function abrirSelects(interaction) {
     console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao} (data: ${pendenciaDaThread.dataFormatada ?? '—'})`);
   }
 
+  // Verifica se a thread foi criada via /enviar (com dados já preenchidos)
+  const preenchido = threadData?.preenchido ?? null;
+
   pending.set(interaction.user.id, {
     channelId:     interaction.channelId,
     setupMsgId:    threadData?.setupMsgId    ?? null,
     originalMsgId: threadData?.originalMsgId ?? null,
-    // Dados da pendência para fallback e pré-preenchimento
-    pilotoNomePendencia: pendenciaDaThread?.piloto   ?? null,
-    pilotoIdPendencia:   pendenciaDaThread?.pilotoId ?? null,
-    acaoPendencia:       pendenciaDaThread?.acao     ?? null,
-    dataFormatada:       pendenciaDaThread?.dataFormatada ?? null,
+    // Dados do /enviar têm prioridade; fallback para pendência da thread
+    pilotoNomePendencia: preenchido?.pilotoNome ?? pendenciaDaThread?.piloto   ?? null,
+    pilotoIdPendencia:   preenchido?.pilotoId   ?? pendenciaDaThread?.pilotoId ?? null,
+    acaoPendencia:       preenchido?.acao       ?? pendenciaDaThread?.acao     ?? null,
+    dataFormatada:       preenchido?.data       ?? pendenciaDaThread?.dataFormatada ?? null,
+    resultadoPendencia:  preenchido?.resultado  ?? pendenciaDaThread?.resultado ?? null,
   });
 
   await interaction.editReply({
@@ -797,6 +880,87 @@ async function abrirSelects(interaction) {
 
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
+
+  // ── /enviar ───────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'enviar') {
+    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+
+    // Somente pilotos (ou avaliadores) podem usar
+    const temPiloto    = member?.roles.cache.has(process.env.PILOT_ROLE_ID);
+    const temAvaliador = member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+    if (!temPiloto && !temAvaliador) {
+      await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Busca pendências do próprio piloto
+    const pilotoId   = interaction.user.id;
+    const pilotoNome = member?.displayName ?? interaction.user.username;
+    const agora      = new Date();
+
+    const minhasPendencias = [...pendencias.entries()]
+      .filter(([, p]) => {
+        if (p.pilotoId !== pilotoId) return false;
+        const dias = (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
+        return dias <= 14; // janela um pouco maior pra pilotos
+      })
+      .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
+
+    if (minhasPendencias.length === 0) {
+      // Sem pendências — abre modal pra preencher manualmente
+      pendingEnvio.set(interaction.user.id, {
+        pilotoId,
+        pilotoNome,
+        pendenciaId: null,
+        acao:        null,
+        resultado:   null,
+        data:        null,
+      });
+
+      const modal = new ModalBuilder().setCustomId('enviar_manual').setTitle('Enviar Ação');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_acao').setLabel('Ação').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Ex: Fleeca Shopping').setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_data').setLabel('Data').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Ex: 30/05/2026').setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_resultado').setLabel('Resultado').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Vitória ou Derrota').setRequired(false)
+        ),
+      );
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // Com pendências — mostra select
+    const opcoes = minhasPendencias.slice(0, 25).map(([id, p]) => {
+      const data  = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+      const label = `${p.acao ?? '—'} — ${data}${p.resultado ? ' (' + p.resultado + ')' : ''}`;
+      return { label: label.slice(0, 100), value: id };
+    });
+
+    pendingEnvio.set(interaction.user.id, { pilotoId, pilotoNome });
+
+    await interaction.editReply({
+      content: `📋 **Selecione a pendência que você está enviando:**`,
+      components: [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('sel_enviar_pendencia')
+            .setPlaceholder('Selecione a ação...')
+            .addOptions(opcoes)
+        ),
+      ],
+    });
+    return;
+  }
 
   // ── /pendencias ───────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'pendencias') {
@@ -939,6 +1103,62 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // ── Select /enviar — escolha de pendência ──────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'sel_enviar_pendencia') {
+    const state = pendingEnvio.get(interaction.user.id);
+    if (!state) { await interaction.deferUpdate(); return; }
+
+    const pendenciaId = interaction.values[0];
+    const p           = pendencias.get(pendenciaId);
+
+    state.pendenciaId = pendenciaId;
+    state.acao        = p?.acao        ?? null;
+    state.resultado   = p?.resultado   ?? null;
+    state.data        = p?.dataFormatada ?? null;
+    pendingEnvio.set(interaction.user.id, state);
+
+    const acao      = p?.acao ?? '—';
+    const data      = p?.dataFormatada ?? '—';
+    const resultado = p?.resultado ?? '—';
+
+    await interaction.update({
+      content: `✅ **Selecionado:** ${acao} — ${data} (${resultado})
+
+Agora **envie o vídeo** respondendo a esta mensagem ou postando no canal de ações.`,
+      components: [],
+    });
+
+    // Aguarda o vídeo: abre uma coleta por DM ou aguarda a próxima mensagem no canal
+    // Registra o estado para capturar a próxima mensagem com vídeo do piloto
+    pendingEnvio.set(interaction.user.id, { ...state, aguardandoVideo: true, channelId: interaction.channelId });
+    return;
+  }
+
+  // ── Modal /enviar manual (sem pendências) ────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId === 'enviar_manual') {
+    const state = pendingEnvio.get(interaction.user.id);
+    if (!state) { await interaction.reply({ content: '❌ Sessão expirada.', flags: MessageFlags.Ephemeral }); return; }
+
+    const acaoRaw    = interaction.fields.getTextInputValue('env_acao').trim();
+    const dataRaw    = interaction.fields.getTextInputValue('env_data').trim();
+    const resultRaw  = interaction.fields.getTextInputValue('env_resultado').trim();
+
+    state.acao      = resolverAcao(acaoRaw) ?? acaoRaw;
+    state.data      = dataRaw;
+    state.resultado = resultRaw || null;
+    state.aguardandoVideo = true;
+    state.channelId = interaction.channelId;
+    pendingEnvio.set(interaction.user.id, state);
+
+    await interaction.reply({
+      content: `✅ **Registrado:** ${state.acao} — ${state.data}${state.resultado ? ' (' + state.resultado + ')' : ''}
+
+Agora **envie o vídeo** neste canal.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   // ── Selects ──────────────────────────────────────────────────────────────
   if (interaction.isStringSelectMenu()) {
     const state = pending.get(interaction.user.id);
@@ -958,6 +1178,16 @@ client.on('interactionCreate', async (interaction) => {
   // ── Botão "Abrir formulário" ──────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
+    // Fallback de resultado e ação dos dados pré-preenchidos (/enviar ou pendência)
+    if (!state.resultado && state.resultadoPendencia) {
+      state.resultado = state.resultadoPendencia;
+      console.log(`🔄 Resultado preenchido via fallback: ${state.resultado}`);
+    }
+    if (!state.acao && state.acaoPendencia) {
+      state.acao = state.acaoPendencia;
+      console.log(`🔄 Ação preenchida via fallback: ${state.acao}`);
+    }
+
     if (!state?.resultado || !state?.acao) {
       await interaction.reply({
         content: '⚠️ Selecione **resultado** e **ação** antes de continuar.',
