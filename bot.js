@@ -468,12 +468,10 @@ async function registrarPendencia(msg) {
     return false;
   }
 
-  // Fallback: usa data de envio da mensagem quando não há data explícita no texto
+  // Fallback: usa data de envio da mensagem no fuso de Brasília
   const dataFinal = dataFormatada ?? (() => {
-    const d = new Date(msg.createdAt);
-    const dia = String(d.getDate()).padStart(2, '0');
-    const mes = String(d.getMonth() + 1).padStart(2, '0');
-    return `${dia}/${mes}/${d.getFullYear()}`;
+    const partes = new Date(msg.createdAt).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }).split('/');
+    return `${partes[0].padStart(2,'0')}/${partes[1].padStart(2,'0')}/${partes[2]}`;
   })();
 
   pendencias.set(parsed.id, {
@@ -1351,7 +1349,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // ── Select /pendencias — resolver múltiplas ────────────────────────────────
-  if (interaction.isStringSelectMenu() && interaction.customId === 'sel_resolver_pendencias') {
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('sel_resolver_pendencias')) {
     if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
@@ -1389,34 +1387,39 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    const agora = new Date();
     const lista = [...pendencias.entries()]
-      .filter(([, p]) => (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24) <= 7)
       .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
     if (lista.length === 0) {
-      await interaction.reply({ content: '✅ Nenhuma pendência em aberto nos últimos 7 dias!', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: '✅ Nenhuma pendência em aberto!', flags: MessageFlags.Ephemeral });
       return;
     }
 
-    const opcoes = lista.slice(0, 25).map(([id, p]) => {
-      const data  = p.dataFormatada ?? '—';
-      const label = `${p.piloto ?? '—'} — ${p.acao ?? '—'} (${data})`.slice(0, 100);
-      return { label, value: id };
+    // Divide em grupos de 25 (limite do Discord por select), máx 5 ActionRows
+    const grupos = [];
+    for (let i = 0; i < Math.min(lista.length, 125); i += 25) {
+      grupos.push(lista.slice(i, i + 25));
+    }
+
+    const components = grupos.map((grupo, idx) => {
+      const opcoes = grupo.map(([id, p]) => {
+        const data  = p.dataFormatada ?? '—';
+        const label = `${p.piloto ?? '—'} — ${p.acao ?? '—'} (${data})`.slice(0, 100);
+        return { label, value: id };
+      });
+      return new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`sel_resolver_pendencias_${idx}`)
+          .setPlaceholder(grupos.length > 1 ? `Grupo ${idx + 1} de ${grupos.length} — Selecione...` : 'Selecione uma ou mais...')
+          .setMinValues(1)
+          .setMaxValues(opcoes.length)
+          .addOptions(opcoes)
+      );
     });
 
     await interaction.reply({
-      content: `📋 **Selecione as pendências para resolver** (${lista.length} em aberto):`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId('sel_resolver_pendencias')
-            .setPlaceholder('Selecione uma ou mais...')
-            .setMinValues(1)
-            .setMaxValues(opcoes.length)
-            .addOptions(opcoes)
-        ),
-      ],
+      content: `📋 **Selecione as pendências para resolver** (${lista.length} em aberto${lista.length > 125 ? ', mostrando primeiras 125' : ''}):`,
+      components,
       flags: MessageFlags.Ephemeral,
     });
     return;
