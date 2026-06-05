@@ -417,7 +417,42 @@ function parseMensagemPiloto(message) {
   const acaoRaw    = extrairCampo(['a[çc][aã]o', 'acao', 'ação']);
   const dataRaw    = extrairCampo(['data']);
 
-  if (!acaoRaw && !dataRaw) return null; // não parece ser esse formato
+  // Fallback: texto livre sem prefixos (ex: "Fleeca Shopping 04/06/26 Vitória")
+  if (!acaoRaw && !dataRaw) {
+    // Tenta extrair data de qualquer lugar no texto
+    const mData = texto.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+    if (!mData) return null; // sem data = provavelmente não é um envio de ação
+
+    const dia    = mData[1].padStart(2, '0');
+    const mes    = mData[2].padStart(2, '0');
+    const anoRaw = mData[3];
+    const ano    = anoRaw
+      ? (parseInt(anoRaw) < 100 ? 2000 + parseInt(anoRaw) : parseInt(anoRaw))
+      : new Date().getFullYear();
+    const dataFormatadaLivre = `${dia}/${mes}/${ano}`;
+
+    // Remove a data do texto e tenta resolver ação com o que sobrou
+    const textoSemData = texto.replace(mData[0], '').trim();
+    const acaoLivreResolvida = resolverAcao(textoSemData);
+    if (!acaoLivreResolvida) return null; // não reconheceu nenhuma ação
+
+    // Extrai resultado do texto original
+    let resultadoLivre = null;
+    if (/vit[oó]ria|ganhou|win/i.test(texto))       resultadoLivre = 'Vitória';
+    else if (/derrota|perdeu|loss|no tiro/i.test(texto)) resultadoLivre = 'Derrota';
+
+    const pilotoNomeLivre = message.member?.displayName ?? message.author.username;
+    const pilotoIdLivre   = message.member?.id ?? message.author.id;
+
+    return {
+      piloto:        pilotoNomeLivre,
+      pilotoId:      pilotoIdLivre,
+      acao:          acaoLivreResolvida,
+      resultado:     resultadoLivre,
+      dataFormatada: dataFormatadaLivre,
+      id:            message.id,
+    };
+  }
 
   // Extrai resultado da ação — "(Vitória)", "(Derrota)", "no tiro", etc.
   let resultado = null;
@@ -722,6 +757,21 @@ client.on('messageCreate', async (message) => {
       }
     }
 
+    // Se não extraiu ação/data pelo título do YouTube, tenta pelo corpo da mensagem
+    const dadosMensagem = parseMensagemPiloto(message);
+    if (dadosMensagem?.acao && !acaoDoVideo) {
+      acaoDoVideo = dadosMensagem.acao;
+      console.log(`📝 Ação extraída do corpo da mensagem: ${acaoDoVideo}`);
+    }
+    if (dadosMensagem?.dataFormatada && timestampDoVideo === message.createdAt) {
+      const [d, m2, a] = dadosMensagem.dataFormatada.split('/');
+      const dataObj = new Date(parseInt(a), parseInt(m2) - 1, parseInt(d));
+      if (!isNaN(dataObj.getTime())) {
+        timestampDoVideo = dataObj;
+        console.log(`📅 Data extraída do corpo da mensagem: ${dadosMensagem.dataFormatada}`);
+      }
+    }
+
     const resolvida = acaoDoVideo
       ? tentarResolverPendencia(pilotoNome, timestampDoVideo, acaoDoVideo)
       : null;
@@ -729,6 +779,16 @@ client.on('messageCreate', async (message) => {
     if (resolvida) {
       console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${Math.round(resolvida.score * 100)}%)`);
     }
+
+    // Dados pré-preenchidos: pendência resolvida > corpo da mensagem > título do YouTube
+    const pilotoId  = message.member?.id ?? null;
+    const preenchido = (resolvida || dadosMensagem?.acao) ? {
+      pilotoId,
+      pilotoNome,
+      acao:      resolvida?.acao           ?? dadosMensagem?.acao      ?? acaoDoVideo ?? null,
+      resultado: resolvida?.resultado      ?? dadosMensagem?.resultado ?? null,
+      data:      resolvida?.dataFormatada  ?? dadosMensagem?.dataFormatada ?? null,
+    } : null;
 
     const thread = await message.startThread({
       name: `Avaliação — ${pilotoNome}`,
@@ -747,6 +807,11 @@ client.on('messageCreate', async (message) => {
         `> **Ação:** ${resolvida.acao ?? '—'} | **Resultado:** ${resolvida.resultado ?? '—'}\n` +
         `> 🔗 [Ver no canal de pendências](${resolvida.messageUrl})`
       )
+      : preenchido
+      ? (
+        `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.\n\n` +
+        `> **Ação:** ${preenchido.acao ?? '—'} | **Resultado:** ${preenchido.resultado ?? '—'} | **Data:** ${preenchido.data ?? '—'}`
+      )
       : `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.`;
 
     const setupMsg = await thread.send({
@@ -754,7 +819,11 @@ client.on('messageCreate', async (message) => {
       components: [new ActionRowBuilder().addComponents(botao)],
     });
 
-    threadSetupMsgs.set(thread.id, { setupMsgId: setupMsg.id, originalMsgId: message.id });
+    threadSetupMsgs.set(thread.id, {
+      setupMsgId:    setupMsg.id,
+      originalMsgId: message.id,
+      preenchido:    preenchido ?? null,
+    });
     saveThreads();
     console.log(`✅ Thread criada para ${pilotoNome}`);
 
