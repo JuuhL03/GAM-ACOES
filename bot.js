@@ -31,9 +31,50 @@ const threadSetupMsgs = new Map();
 const pendencias      = new Map();
 const resolvidas      = new Set();
 
-const THREADS_PATH    = path.join(__dirname, 'pendingThreads.json');
-const PENDENCIAS_PATH = path.join(__dirname, 'pendencias.json');
-const RESOLVIDAS_PATH = path.join(__dirname, 'resolvidas.json');
+// Usa volume persistido no Railway se disponível, senão usa diretório local
+const DATA_DIR        = fs.existsSync('/app/data') ? '/app/data' : __dirname;
+const THREADS_PATH    = path.join(DATA_DIR, 'pendingThreads.json');
+const PENDENCIAS_PATH = path.join(DATA_DIR, 'pendencias.json');
+const RESOLVIDAS_PATH = path.join(DATA_DIR, 'resolvidas.json');
+const AVALIADOS_PATH  = path.join(DATA_DIR, 'avaliados.json');
+
+// lista de { pilotoId, pilotoNome, acao, data } já avaliados
+const avaliados = [];
+
+function loadAvaliados() {
+  if (fs.existsSync(AVALIADOS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(AVALIADOS_PATH, 'utf8'));
+      avaliados.push(...data);
+      console.log(`✅ ${avaliados.length} relatório(s) avaliado(s) carregado(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar avaliados.json:', e.message); }
+  }
+}
+
+function saveAvaliados() {
+  fs.writeFileSync(AVALIADOS_PATH, JSON.stringify(avaliados, null, 2));
+}
+
+function registrarAvaliado({ pilotoId, pilotoNome, acao, data }) {
+  // Evita duplicatas exatas
+  const jaExiste = avaliados.some(a =>
+    a.pilotoId === pilotoId &&
+    normalizar(a.acao) === normalizar(acao) &&
+    a.data === data
+  );
+  if (jaExiste) return;
+  avaliados.push({ pilotoId, pilotoNome, acao, data, timestamp: new Date().toISOString() });
+  saveAvaliados();
+}
+
+function jaFoiAvaliadoPorLista(pilotoId, acao, data) {
+  if (!pilotoId || !acao || !data) return false;
+  return avaliados.some(a =>
+    a.pilotoId === pilotoId &&
+    normalizar(a.acao) === normalizar(acao) &&
+    a.data === data
+  );
+}
 
 // ── Persistência ──────────────────────────────────────────────────────────────
 function loadThreads() {
@@ -96,38 +137,94 @@ async function verificarPermissao(userId) {
   return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 }
 
-// ── Helper: verifica se mensagem original já tem reação do bot ou de avaliador
-async function jaFoiAvaliada(messageId) {
-  if (!messageId || !process.env.THREAD_CHANNEL_ID) return false;
+// ── Helper: constrói mapa de mensagens avaliadas no THREAD_CHANNEL_ID ────────
+// Retorna Map<authorId, Date[]> — pilotos e datas das mensagens com reação
+async function construirMapaAvaliadas(limit = 200) {
+  // mapa: authorId -> lista de timestamps das mensagens com reação
+  const mapa = new Map();
+  if (!process.env.THREAD_CHANNEL_ID) return mapa;
   try {
     const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
-    const msg   = await canal.messages.fetch(messageId).catch(() => null);
-    if (!msg) return false;
-    if (!msg.reactions.cache.size) return false;
-
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
 
-    for (const reacao of msg.reactions.cache.values()) {
-      // Busca os usuários que reagiram (limite 10 — suficiente pro caso)
-      const usuarios = await reacao.users.fetch({ limit: 10 }).catch(() => null);
-      if (!usuarios) continue;
+    // IDs de avaliadores para lookup rápido
+    const avaliadoresIds = new Set([client.user.id]);
+    if (process.env.ALLOWED_ROLE_ID && guild) {
+      const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+      if (role) for (const [id] of role.members) avaliadoresIds.add(id);
+    }
 
-      for (const [userId, user] of usuarios) {
-        // Reação do próprio bot
-        if (user.id === client.user.id) return true;
+    let before = undefined;
+    let totalFetched = 0;
+    while (totalFetched < limit) {
+      const batch = await canal.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+      if (!batch.size) break;
 
-        // Reação de alguém com cargo de avaliador
-        if (process.env.ALLOWED_ROLE_ID && guild) {
-          const membro = guild.members.cache.get(userId)
-            ?? await guild.members.fetch(userId).catch(() => null);
-          if (membro?.roles.cache.has(process.env.ALLOWED_ROLE_ID)) return true;
+      for (const [, msg] of batch) {
+        if (!msg.reactions.cache.size) continue;
+        let foiAvaliada = false;
+
+        for (const reacao of msg.reactions.cache.values()) {
+          if (reacao.me) { foiAvaliada = true; break; }
+          const usuarios = await reacao.users.fetch({ limit: 20 }).catch(() => null);
+          if (usuarios?.some(u => avaliadoresIds.has(u.id))) { foiAvaliada = true; break; }
+        }
+
+        if (foiAvaliada) {
+          const authorId = msg.author?.id ?? msg.member?.id;
+          if (!authorId) continue;
+          if (!mapa.has(authorId)) mapa.set(authorId, []);
+          mapa.get(authorId).push(new Date(msg.createdAt));
         }
       }
+
+      totalFetched += batch.size;
+      before = batch.last()?.id;
+      if (batch.size < 100) break;
     }
-    return false;
-  } catch {
-    return false;
+
+    console.log(`🔍 Mapa de avaliadas: ${mapa.size} piloto(s) com envios avaliados (de ${totalFetched} mensagens)`);
+  } catch (err) {
+    console.warn('⚠️  Erro ao construir mapa de avaliadas:', err.message);
   }
+  return mapa;
+}
+
+// ── Helper: verifica se pendência já foi avaliada pelo mapa (piloto + data) ──
+function pendenciaJaAvaliada(p, mapaAvaliadas) {
+  if (!p.pilotoId || !mapaAvaliadas.has(p.pilotoId)) return false;
+  const timestamps = mapaAvaliadas.get(p.pilotoId);
+  const tPendencia = new Date(p.timestamp);
+  // Considera avaliada se existe mensagem do piloto com reação dentro de 7 dias da pendência
+  return timestamps.some(t => Math.abs(t - tPendencia) / (1000 * 60 * 60 * 24) <= 7);
+}
+
+// ── Helper: fallback individual para registrarPendencia em tempo real ─────────
+async function jaFoiAvaliadaIndividual(msg) {
+  if (!process.env.THREAD_CHANNEL_ID) return false;
+  try {
+    const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const avaliadoresIds = new Set([client.user.id]);
+    if (process.env.ALLOWED_ROLE_ID && guild) {
+      const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+      if (role) for (const [id] of role.members) avaliadoresIds.add(id);
+    }
+    // Busca mensagens do mesmo autor próximas à data da pendência (±7 dias)
+    const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
+    if (!msgs) return false;
+    const authorId = msg.author?.id;
+    for (const [, m] of msgs) {
+      if (m.author?.id !== authorId) continue;
+      if (!m.reactions.cache.size) continue;
+      for (const reacao of m.reactions.cache.values()) {
+        if (reacao.me) return true;
+        const usuarios = await reacao.users.fetch({ limit: 10 }).catch(() => null);
+        if (usuarios?.some(u => avaliadoresIds.has(u.id))) return true;
+      }
+    }
+  } catch { /* ignora */ }
+  return false;
 }
 
 // ── Lista de ações + aliases ──────────────────────────────────────────────────
@@ -363,8 +460,8 @@ async function registrarPendencia(msg) {
   // Extrai data do conteúdo da mensagem para pré-preencher o modal depois
   const dataFormatada = extrairDataFormatadaDaMensagem(msg);
 
-  // Se a mensagem original já tem reação de avaliado, resolve direto sem registrar
-  if (await jaFoiAvaliada(msg.id)) {
+  // Se o piloto já tem envio avaliado próximo a essa data, resolve direto
+  if (await jaFoiAvaliadaIndividual(msg)) {
     resolvidas.add(parsed.id);
     saveResolvidas();
     console.log(`⏭️  Já avaliada (reação): ${parsed.piloto} — ${parsed.acao}`);
@@ -636,6 +733,7 @@ client.once('ready', async () => {
   loadThreads();
   loadPendencias();
   loadResolvidas();
+  loadAvaliados();
 
   const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
   if (mainGuild) {
@@ -1176,27 +1274,37 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
+      // Busca mensagens do canal de pendências
+      const msgsPendencias = process.env.PENDENCIAS_CHANNEL_ID
+        ? await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID)
+            .then(canal => canal.messages.fetch({ limit: 100 }))
+            .catch(() => null)
+        : null;
+
+      // Import de pendências do canal de bot em paralelo
       let importados = 0;
-      if (process.env.PENDENCIAS_CHANNEL_ID) {
-        const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
-        const msgs  = await canal.messages.fetch({ limit: 100 });
-        for (const [, msg] of msgs) {
+      if (msgsPendencias) {
+        const promises = [];
+        for (const [, msg] of msgsPendencias) {
           if (!msg.author.bot) continue;
-          const ok = await registrarPendencia(msg);
-          if (ok) importados++;
+          promises.push(registrarPendencia(msg).then(ok => { if (ok) importados++; }));
         }
+        await Promise.all(promises);
       }
 
-      // Varre pendências em aberto e resolve as que já têm reação no canal
+      // Auto-resolve pendências cruzando contra avaliados.json (piloto + ação + data exata)
       let autoResolvidas = 0;
       for (const [id, p] of [...pendencias.entries()]) {
-        if (await jaFoiAvaliada(p.messageId)) {
+        if (jaFoiAvaliadoPorLista(p.pilotoId, p.acao, p.dataFormatada)) {
           resolverPendencia(id);
           autoResolvidas++;
-          console.log(`⏭️  Auto-resolvida por reação: ${p.piloto} — ${p.acao}`);
+          console.log(`⏭️  Auto-resolvida por avaliados.json: ${p.piloto} — ${p.acao} (${p.dataFormatada})`);
         }
       }
-      if (autoResolvidas > 0) console.log(`✅ ${autoResolvidas} pendência(s) auto-resolvida(s) por reação`);
+      if (autoResolvidas > 0) {
+        saveResolvidas();
+        console.log(`✅ ${autoResolvidas} pendência(s) auto-resolvida(s)`);
+      }
 
       const agora = new Date();
       const lista = [...pendencias.entries()]
@@ -1552,6 +1660,17 @@ async function gerarEPostar(interaction, dados) {
     }
 
     await canal.send({ files: [imagePath] });
+
+    // Registra no avaliados.json para cruzamento futuro de pendências
+    if (dados.pilotoId && dados.acao && dados.data) {
+      registrarAvaliado({
+        pilotoId:   dados.pilotoId,
+        pilotoNome: dados.pilotoNome,
+        acao:       dados.acao,
+        data:       dados.data,
+      });
+      console.log(`📝 Avaliado registrado: ${dados.pilotoNome} — ${dados.acao} (${dados.data})`);
+    }
 
     if (dados.pilotoId) {
       pendingDM.set(interaction.user.id, {
