@@ -679,13 +679,8 @@ client.on('messageCreate', async (message) => {
           .setStyle(ButtonStyle.Primary);
 
         const conteudo =
-          `## 📋 Avaliação de Piloto
-` +
-          `> **Piloto:** ${pilotoNome}
-` +
-          `> **Ação:** ${envioState.acao ?? '—'} | **Resultado:** ${envioState.resultado ?? '—'} | **Data:** ${envioState.data ?? '—'}
-
-` +
+          `## 📋 Avaliação de Piloto\n` +
+          `> **Piloto:** ${pilotoNome} | **Ação:** ${envioState.acao ?? '—'} | **Resultado:** ${envioState.resultado ?? '—'} | **Data:** ${envioState.data ?? '—'}\n\n` +
           `Clique no botão abaixo para iniciar a avaliação.`;
 
         const setupMsg = await thread.send({
@@ -800,19 +795,22 @@ client.on('messageCreate', async (message) => {
       .setLabel('📋  Iniciar Avaliação')
       .setStyle(ButtonStyle.Primary);
 
-    const conteudoSetup = resolvida
-      ? (
-        `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.\n\n` +
-        `✅ **Pendência de envio resolvida!**\n` +
-        `> **Ação:** ${resolvida.acao ?? '—'} | **Resultado:** ${resolvida.resultado ?? '—'}\n` +
-        `> 🔗 [Ver no canal de pendências](${resolvida.messageUrl})`
-      )
-      : preenchido
-      ? (
-        `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.\n\n` +
-        `> **Ação:** ${preenchido.acao ?? '—'} | **Resultado:** ${preenchido.resultado ?? '—'} | **Data:** ${preenchido.data ?? '—'}`
-      )
-      : `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.`;
+    // Monta mensagem de setup com todos os campos disponíveis num formato padronizado
+    // (usado também para recuperar dados após restart)
+    let conteudoSetup = `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.`;
+    if (resolvida || preenchido) {
+      const acao      = resolvida?.acao      ?? preenchido?.acao      ?? '—';
+      const resultado = resolvida?.resultado ?? preenchido?.resultado ?? '—';
+      const data      = resolvida?.dataFormatada ?? preenchido?.data  ?? '—';
+      const piloto    = pilotoNome ?? '—';
+      conteudoSetup =
+        `## 📋 Avaliação de Piloto\n` +
+        `> **Piloto:** ${piloto} | **Ação:** ${acao} | **Resultado:** ${resultado} | **Data:** ${data}\n\n` +
+        (resolvida
+          ? `✅ **Pendência de envio resolvida!**\n> 🔗 [Ver no canal de pendências](${resolvida.messageUrl})\n\n`
+          : '') +
+        `Clique no botão abaixo para iniciar a avaliação.`;
+    }
 
     const setupMsg = await thread.send({
       content: conteudoSetup,
@@ -871,7 +869,36 @@ async function abrirSelects(interaction) {
       const setupMsgId = setupMsg?.id ?? null;
 
       if (originalMsgId || setupMsgId) {
-        threadData = { setupMsgId, originalMsgId };
+        // Tenta recuperar dados pré-preenchidos do conteúdo da mensagem de setup
+        let preenchidoRecuperado = null;
+        if (setupMsg?.content) {
+          const c = setupMsg.content;
+          // Extrai "Ação: X | Resultado: Y | Data: Z" ou "Piloto: P"
+          const mAcao      = c.match(/\*\*Ação:\*\*\s*([^|\n]+)/);
+          const mResultado = c.match(/\*\*Resultado:\*\*\s*([^|\n]+)/);
+          const mData      = c.match(/\*\*Data:\*\*\s*([^|\n\>]+)/);
+          const mPiloto    = c.match(/\*\*Piloto:\*\*\s*([^\n\>]+)/);
+
+          const acao      = mAcao?.[1]?.trim().replace(/^—$/, '') || null;
+          const resultado = mResultado?.[1]?.trim().replace(/^—$/, '') || null;
+          const data      = mData?.[1]?.trim().replace(/^—$/, '') || null;
+          const pilotoNome = mPiloto?.[1]?.trim() || null;
+
+          // Tenta descobrir o pilotoId pelo nome
+          let pilotoId = null;
+          if (pilotoNome) {
+            const guild  = interaction.guild;
+            const membro = encontrarMembro(guild, pilotoNome, null);
+            pilotoId = membro?.id ?? null;
+          }
+
+          if (acao || resultado || pilotoNome) {
+            preenchidoRecuperado = { acao, resultado, data, pilotoNome, pilotoId };
+            console.log(`♻️  Dados pré-preenchidos recuperados da mensagem: ${pilotoNome} | ${acao} | ${resultado}`);
+          }
+        }
+
+        threadData = { setupMsgId, originalMsgId, preenchido: preenchidoRecuperado };
         threadSetupMsgs.set(interaction.channelId, threadData);
         saveThreads();
         console.log(`♻️  Dados recuperados: setupMsgId=${setupMsgId}, originalMsgId=${originalMsgId}`);
