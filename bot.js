@@ -1320,33 +1320,31 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` +
-        (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
+        (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '');
 
-      const linhas = [cabecalho];
+      // Monta texto da lista
+      const linhas = [];
       for (const [id, p] of lista) {
-        const data = new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        const data = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
         linhas.push(
-          `> **Piloto:** ${p.piloto ?? '—'}\n` +
-          `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
-          `> **Registrado em:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
+          `> **Piloto:** ${p.piloto ?? '—'} | **Ação:** ${p.acao ?? '—'} | **Data:** ${data} | **Resultado:** ${p.resultado ?? '—'} | 🔗 [Ver](${p.messageUrl})`
         );
       }
+      const textoLista = cabecalho + '\n\n' + linhas.join('\n');
 
-      let buffer = '';
-      let primeiroEnvio = true;
-      for (const linha of linhas) {
-        if ((buffer + linha).length > 1900) {
-          if (emDM && primeiroEnvio) { await interaction.editReply({ content: buffer }); primeiroEnvio = false; }
-          else if (emDM) { await interaction.followUp({ content: buffer, flags: MessageFlags.Ephemeral }); }
-          else await interaction.user.send(buffer);
-          buffer = '';
+      // Envia só o texto — sem select (use /resolver pra resolver)
+      if (emDM) {
+        if (textoLista.length > 1900) {
+          const partes = textoLista.match(/.{1,1900}/gs) ?? [textoLista];
+          await interaction.editReply({ content: partes[0] });
+          for (let i = 1; i < partes.length; i++) {
+            await interaction.followUp({ content: partes[i], flags: MessageFlags.Ephemeral });
+          }
+        } else {
+          await interaction.editReply({ content: textoLista });
         }
-        buffer += linha + '\n';
-      }
-      if (buffer.trim()) {
-        if (emDM && primeiroEnvio) await interaction.editReply({ content: buffer });
-        else if (emDM) await interaction.followUp({ content: buffer, flags: MessageFlags.Ephemeral });
-        else await interaction.user.send(buffer);
+      } else {
+        await interaction.user.send({ content: textoLista });
       }
 
     } catch (err) {
@@ -1359,21 +1357,14 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── /resolver ─────────────────────────────────────────────────────────────
-  if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
+  // ── Select /pendencias — resolver múltiplas ────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === 'sel_resolver_pendencias') {
     if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
 
-    const input = interaction.options.getString('id')?.trim();
-    if (!input) {
-      await interaction.reply({ content: '❌ Informe o(s) ID(s) da(s) pendência(s).', flags: MessageFlags.Ephemeral });
-      return;
-    }
-
-    const ids = input.split(',').map(s => s.trim()).filter(Boolean);
-
+    const ids = interaction.values;
     const resultados = [];
     let okCount = 0, failCount = 0;
 
@@ -1385,20 +1376,56 @@ client.on('interactionCreate', async (interaction) => {
       }
       const p = pendencias.get(id);
       resolverPendencia(id);
-      resultados.push(`✅ \`${id}\` — ${p.piloto ?? '—'} | ${p.acao ?? '—'}`);
+      resultados.push(`✅ ${p.piloto ?? '—'} — ${p.acao ?? '—'} (${p.dataFormatada ?? '—'})`);
       okCount++;
     }
 
-    const resumo = ids.length > 1
-      ? `**${okCount} resolvida(s), ${failCount} não encontrada(s)**\n\n`
-      : '';
-
-    await interaction.reply({
+    const resumo = `**${okCount} resolvida(s)${failCount > 0 ? ', ' + failCount + ' não encontrada(s)' : ''}**\n\n`;
+    await interaction.update({
       content: resumo + resultados.join('\n'),
-      flags: MessageFlags.Ephemeral,
+      components: [],
+    });
+    console.log(`✅ Resolver via select: ${okCount} ok, ${failCount} falha (por ${interaction.user.tag})`);
+    return;
+  }
+
+  // ── /resolver ─────────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'resolver') {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const agora = new Date();
+    const lista = [...pendencias.entries()]
+      .filter(([, p]) => (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24) <= 7)
+      .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
+
+    if (lista.length === 0) {
+      await interaction.reply({ content: '✅ Nenhuma pendência em aberto nos últimos 7 dias!', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const opcoes = lista.slice(0, 25).map(([id, p]) => {
+      const data  = p.dataFormatada ?? '—';
+      const label = `${p.piloto ?? '—'} — ${p.acao ?? '—'} (${data})`.slice(0, 100);
+      return { label, value: id };
     });
 
-    console.log(`🗑️  Resolver batch: ${okCount} ok, ${failCount} falha (por ${interaction.user.tag})`);
+    await interaction.reply({
+      content: `📋 **Selecione as pendências para resolver** (${lista.length} em aberto):`,
+      components: [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId('sel_resolver_pendencias')
+            .setPlaceholder('Selecione uma ou mais...')
+            .setMinValues(1)
+            .setMaxValues(opcoes.length)
+            .addOptions(opcoes)
+        ),
+      ],
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
