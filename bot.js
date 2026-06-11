@@ -1543,7 +1543,7 @@ client.on('interactionCreate', async (interaction) => {
       msg += `└─ ❌ ${st.derrota}x Derrota${st.derrota !== 1 ? 's' : ''}\n\n`;
 
       for (const a of st.acoes) {
-        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
+        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/${process.env.REGISTROS_CHANNEL_ID}/${a.messageId})` : '—';
         msg += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
       }
       msg += '\n';
@@ -1999,11 +1999,11 @@ async function gerarEPostar(interaction, dados) {
     await canal.send({ files: [imagePath] });
 
     // ── Enviar para canal de relatórios ──
-    const canalRelatorios = client.channels.cache.get('1514708221867196627');
+    const canalRelatorios = client.channels.cache.get(process.env.RELATORIOS_CHANNEL_ID);
     if (canalRelatorios) {
       const mencaoPiloto = dados.pilotoId ? `<@${dados.pilotoId}>` : dados.pilotoNome;
       const linkOriginal = dados.originalMsgId 
-        ? `https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${dados.originalMsgId}`
+        ? `https://discord.com/channels/${process.env.GUILD_ID}/${process.env.REGISTROS_CHANNEL_ID}/${dados.originalMsgId}`
         : null;
 
       const embed = {
