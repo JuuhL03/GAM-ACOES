@@ -1610,7 +1610,7 @@ client.on('interactionCreate', async (interaction) => {
     let msg = `🏆 **Ranking Semanal** (${semanaStart.toLocaleDateString('pt-BR')})\n\n`;
     
     msg += `**📊 Mais Ações**\n`;
-    byTotal.forEach((,[st], i) => {
+    byTotal.forEach(([, st], i) => {
       msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.acoes.length}\n`;
     });
     
