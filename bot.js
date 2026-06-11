@@ -10,8 +10,10 @@ const {
   ButtonStyle,
   StringSelectMenuBuilder,
   MessageFlags,
+  EmbedBuilder,
 } = require('discord.js');
 const { generateReportImage } = require('./generateImage');
+const cron = require('node-cron');
 const fs   = require('fs');
 const path = require('path');
 
@@ -21,24 +23,23 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
   ],
 });
 
 const pending         = new Map();
-const pendingEnvio    = new Map(); // estado do /enviar por piloto
+const pendingEnvio    = new Map();
 const pendingDM       = new Map();
 const threadSetupMsgs = new Map();
 const pendencias      = new Map();
 const resolvidas      = new Set();
 
-// Usa volume persistido no Railway se disponível, senão usa diretório local
 const DATA_DIR        = fs.existsSync('/app/data') ? '/app/data' : __dirname;
 const THREADS_PATH    = path.join(DATA_DIR, 'pendingThreads.json');
 const PENDENCIAS_PATH = path.join(DATA_DIR, 'pendencias.json');
 const RESOLVIDAS_PATH = path.join(DATA_DIR, 'resolvidas.json');
 const AVALIADOS_PATH  = path.join(DATA_DIR, 'avaliados.json');
 
-// lista de { pilotoId, pilotoNome, acao, data } já avaliados
 const avaliados = [];
 
 function loadAvaliados() {
@@ -55,15 +56,22 @@ function saveAvaliados() {
   fs.writeFileSync(AVALIADOS_PATH, JSON.stringify(avaliados, null, 2));
 }
 
-function registrarAvaliado({ pilotoId, pilotoNome, acao, data }) {
-  // Evita duplicatas exatas
+function registrarAvaliado({ pilotoId, pilotoNome, acao, data, resultado, messageId }) {
   const jaExiste = avaliados.some(a =>
     a.pilotoId === pilotoId &&
     normalizar(a.acao) === normalizar(acao) &&
     a.data === data
   );
   if (jaExiste) return;
-  avaliados.push({ pilotoId, pilotoNome, acao, data, timestamp: new Date().toISOString() });
+  avaliados.push({
+    pilotoId,
+    pilotoNome,
+    acao,
+    data,
+    resultado: resultado || null,
+    messageId: messageId || null,
+    timestamp: new Date().toISOString()
+  });
   saveAvaliados();
 }
 
@@ -76,7 +84,6 @@ function jaFoiAvaliadoPorLista(pilotoId, acao, data) {
   );
 }
 
-// ── Persistência ──────────────────────────────────────────────────────────────
 function loadThreads() {
   if (fs.existsSync(THREADS_PATH)) {
     try {
@@ -130,24 +137,86 @@ function resolverPendencia(id) {
   saveResolvidas();
 }
 
-// ── Helper: verifica permissão (funciona em servidor e em DM) ────────────────
+// ── Semana (começa quarta-feira) ──────────────────────────────────────────────
+function getWeekStart(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay(); // 0=dom, 3=qua, 6=sab
+  const diff = d.getDate() - day + (day <= 3 ? -day + 3 : 10 - day);
+  d.setDate(diff);
+  return d;
+}
+
+// ── Estatísticas por período ──────────────────────────────────────────────────
+function getAvaliadosByPeriod(startDate, endDate) {
+  const stats = new Map();
+
+  for (const a of avaliados) {
+    const aDate = new Date(a.timestamp);
+    if (aDate < startDate || aDate >= endDate) continue;
+
+    if (!stats.has(a.pilotoId)) {
+      stats.set(a.pilotoId, {
+        pilotoNome: a.pilotoNome,
+        acoes: [],
+        vitoria: 0,
+        derrota: 0,
+      });
+    }
+
+    const st = stats.get(a.pilotoId);
+    st.acoes.push({
+      data: a.data,
+      acao: a.acao,
+      resultado: a.resultado,
+      messageId: a.messageId,
+    });
+
+    if (a.resultado === 'Vitória') st.vitoria++;
+    else if (a.resultado === 'Derrota') st.derrota++;
+  }
+
+  return stats;
+}
+
+function getTotalAvaliadosStats() {
+  const stats = new Map();
+
+  for (const a of avaliados) {
+    if (!stats.has(a.pilotoId)) {
+      stats.set(a.pilotoId, {
+        pilotoNome: a.pilotoNome,
+        total: 0,
+        vitoria: 0,
+        derrota: 0,
+      });
+    }
+
+    const st = stats.get(a.pilotoId);
+    st.total++;
+
+    if (a.resultado === 'Vitória') st.vitoria++;
+    else if (a.resultado === 'Derrota') st.derrota++;
+  }
+
+  return stats;
+}
+
+// ── Helper: verifica permissão ────────────────────────────────────────────────
 async function verificarPermissao(userId) {
   const guild  = client.guilds.cache.get(process.env.GUILD_ID);
   const member = await guild?.members.fetch(userId).catch(() => null);
   return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 }
 
-// ── Helper: constrói mapa de mensagens avaliadas no THREAD_CHANNEL_ID ────────
-// Retorna Map<authorId, Date[]> — pilotos e datas das mensagens com reação
+// ── Helper: constrói mapa de mensagens avaliadas ──────────────────────────────
 async function construirMapaAvaliadas(limit = 200) {
-  // mapa: authorId -> lista de timestamps das mensagens com reação
   const mapa = new Map();
   if (!process.env.THREAD_CHANNEL_ID) return mapa;
   try {
     const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
 
-    // IDs de avaliadores para lookup rápido
     const avaliadoresIds = new Set([client.user.id]);
     if (process.env.ALLOWED_ROLE_ID && guild) {
       const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
@@ -183,23 +252,13 @@ async function construirMapaAvaliadas(limit = 200) {
       if (batch.size < 100) break;
     }
 
-    console.log(`🔍 Mapa de avaliadas: ${mapa.size} piloto(s) com envios avaliados (de ${totalFetched} mensagens)`);
+    console.log(`🔍 Mapa de avaliadas: ${mapa.size} piloto(s) com envios avaliados`);
   } catch (err) {
     console.warn('⚠️  Erro ao construir mapa de avaliadas:', err.message);
   }
   return mapa;
 }
 
-// ── Helper: verifica se pendência já foi avaliada pelo mapa (piloto + data) ──
-function pendenciaJaAvaliada(p, mapaAvaliadas) {
-  if (!p.pilotoId || !mapaAvaliadas.has(p.pilotoId)) return false;
-  const timestamps = mapaAvaliadas.get(p.pilotoId);
-  const tPendencia = new Date(p.timestamp);
-  // Considera avaliada se existe mensagem do piloto com reação dentro de 7 dias da pendência
-  return timestamps.some(t => Math.abs(t - tPendencia) / (1000 * 60 * 60 * 24) <= 7);
-}
-
-// ── Helper: fallback individual para registrarPendencia em tempo real ─────────
 async function jaFoiAvaliadaIndividual(msg) {
   if (!process.env.THREAD_CHANNEL_ID) return false;
   try {
@@ -210,7 +269,6 @@ async function jaFoiAvaliadaIndividual(msg) {
       const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
       if (role) for (const [id] of role.members) avaliadoresIds.add(id);
     }
-    // Busca mensagens do mesmo autor próximas à data da pendência (±7 dias)
     const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
     if (!msgs) return false;
     const authorId = msg.author?.id;
@@ -223,7 +281,7 @@ async function jaFoiAvaliadaIndividual(msg) {
         if (usuarios?.some(u => avaliadoresIds.has(u.id))) return true;
       }
     }
-  } catch { /* ignora */ }
+  } catch { }
   return false;
 }
 
@@ -287,7 +345,6 @@ function extrairDataDoTitulo(titulo) {
 
 const URL_REGEX = /https?:\/\/\S+/i;
 
-// ── Dice coefficient ──────────────────────────────────────────────────────────
 function bigrams(str) {
   const s = (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
@@ -309,7 +366,6 @@ function normalizar(str) {
   return (str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
-// ── Fetch título do YouTube via oEmbed ────────────────────────────────────────
 async function fetchTituloYoutube(url) {
   try {
     const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
@@ -321,7 +377,6 @@ async function fetchTituloYoutube(url) {
   }
 }
 
-// ── Parser do embed de pendência ──────────────────────────────────────────────
 function limpar(str) {
   return (str || '').replace(/^[>|]\s*/gm, '').trim();
 }
@@ -366,9 +421,7 @@ function parseEmbedPendencia(message) {
   return { piloto, pilotoId, acao: acao ?? tituloRaw, resultado: resultado || null, id: id ?? message.id };
 }
 
-// ── Helper: extrai data formatada do conteúdo da mensagem ────────────────────
 function extrairDataFormatadaDaMensagem(message) {
-  // Tenta extrair padrão "Data: DD/MM/AA" ou "Data: DD/MM/AAAA" do conteúdo ou campos do embed
   const fontes = [];
 
   if (message.embeds?.[0]) {
@@ -382,7 +435,6 @@ function extrairDataFormatadaDaMensagem(message) {
 
   for (const texto of fontes) {
     if (!texto) continue;
-    // Busca "Data: 31/05/26" ou "Data: 31/05/2026"
     const match = texto.match(/data[:\s]+(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/i);
     if (match) {
       const dia = match[1].padStart(2, '0');
@@ -395,7 +447,6 @@ function extrairDataFormatadaDaMensagem(message) {
     }
   }
 
-  // Fallback: qualquer data sozinha no texto
   for (const texto of fontes) {
     if (!texto) continue;
     const match = texto.match(/(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/);
@@ -413,7 +464,6 @@ function extrairDataFormatadaDaMensagem(message) {
   return null;
 }
 
-// ── Helper: encontra membro no servidor ──────────────────────────────────────
 function encontrarMembro(guild, nomePiloto, pilotoId) {
   if (pilotoId) return guild.members.cache.get(pilotoId) ?? null;
   if (!nomePiloto) return null;
@@ -424,7 +474,6 @@ function encontrarMembro(guild, nomePiloto, pilotoId) {
       ?? null;
 }
 
-// ── Helper: registra pendência ────────────────────────────────────────────────
 async function registrarPendencia(msg) {
   const parsed = parseEmbedPendencia(msg);
   if (!parsed) return false;
@@ -457,10 +506,8 @@ async function registrarPendencia(msg) {
     parsed.pilotoId = membro.id;
   }
 
-  // Extrai data do conteúdo da mensagem para pré-preencher o modal depois
   const dataFormatada = extrairDataFormatadaDaMensagem(msg);
 
-  // Se o piloto já tem envio avaliado próximo a essa data, resolve direto
   if (await jaFoiAvaliadaIndividual(msg)) {
     resolvidas.add(parsed.id);
     saveResolvidas();
@@ -468,7 +515,6 @@ async function registrarPendencia(msg) {
     return false;
   }
 
-  // Fallback: usa data de envio da mensagem no fuso de Brasília
   const dataFinal = dataFormatada ?? (() => {
     const partes = new Date(msg.createdAt).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }).split('/');
     return `${partes[0].padStart(2,'0')}/${partes[1].padStart(2,'0')}/${partes[2]}`;
@@ -485,11 +531,10 @@ async function registrarPendencia(msg) {
     dataFormatada: dataFinal,
   });
   savePendencias();
-  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao} (data: ${dataFinal}${dataFormatada ? '' : ' [fallback envio]'}) (total: ${pendencias.size})`);
+  console.log(`📋 Pendência registrada: ${parsed.piloto} — ${parsed.acao}`);
   return true;
 }
 
-// ── Matching ──────────────────────────────────────────────────────────────────
 const MATCH_THRESHOLD       = 0.38;
 const MIN_PILOTO_SCORE      = 0.20;
 const DATA_TOLERANCE_DIAS   = 7;
@@ -536,27 +581,17 @@ function tentarResolverPendencia(pilotoNome, timestampVideo, acaoVideo = null) {
   return null;
 }
 
-// ── Helper: tenta encontrar pendência relacionada à thread ───────────────────
 function encontrarPendenciaDaThread(threadId) {
-  // Busca a pendência mais recente cujo piloto seja o dono da thread
-  // A thread se chama "Avaliação — <displayName>", mas aqui só temos o threadId.
-  // Retornamos a pendência mais recente em aberto — o avaliador pode sobrescrever pelo select.
   const lista = [...pendencias.entries()]
     .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
   if (lista.length === 0) return null;
-  return lista[0][1]; // pendência mais recente
+  return lista[0][1];
 }
 
-// ── Parser de mensagem de piloto (formato livre, sem embed) ──────────────────
-// Suporta formatos como:
-//   AÇÃO: `BANCO FLEECA DA PRAIA "no tiro"` ... DATA: `30/05/2026`
-//   Ação: Fleeca Shopping (Vitória) Data: 03/06/26
 function parseMensagemPiloto(message) {
   const texto = message.content;
   if (!texto) return null;
 
-  // Extrai campos chave:valor (com ou sem backticks, case-insensitive)
-  // Ex: AÇÃO: `valor` ou Ação: valor
   function extrairCampo(chaves) {
     for (const chave of chaves) {
       const re = new RegExp(chave + '[:\\s]+`?([^`\\n]+)`?', 'i');
@@ -569,11 +604,9 @@ function parseMensagemPiloto(message) {
   const acaoRaw    = extrairCampo(['a[çc][aã]o', 'acao', 'ação']);
   const dataRaw    = extrairCampo(['data']);
 
-  // Fallback: texto livre sem prefixos (ex: "Fleeca Shopping 04/06/26 Vitória")
   if (!acaoRaw && !dataRaw) {
-    // Tenta extrair data de qualquer lugar no texto
     const mData = texto.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
-    if (!mData) return null; // sem data = provavelmente não é um envio de ação
+    if (!mData) return null;
 
     const dia    = mData[1].padStart(2, '0');
     const mes    = mData[2].padStart(2, '0');
@@ -583,12 +616,10 @@ function parseMensagemPiloto(message) {
       : new Date().getFullYear();
     const dataFormatadaLivre = `${dia}/${mes}/${ano}`;
 
-    // Remove a data do texto e tenta resolver ação com o que sobrou
     const textoSemData = texto.replace(mData[0], '').trim();
     const acaoLivreResolvida = resolverAcao(textoSemData);
-    if (!acaoLivreResolvida) return null; // não reconheceu nenhuma ação
+    if (!acaoLivreResolvida) return null;
 
-    // Extrai resultado do texto original
     let resultadoLivre = null;
     if (/vit[oó]ria|ganhou|win/i.test(texto))       resultadoLivre = 'Vitória';
     else if (/derrota|perdeu|loss|no tiro/i.test(texto)) resultadoLivre = 'Derrota';
@@ -606,7 +637,6 @@ function parseMensagemPiloto(message) {
     };
   }
 
-  // Extrai resultado da ação — "(Vitória)", "(Derrota)", "no tiro", etc.
   let resultado = null;
   if (acaoRaw) {
     const mVit  = acaoRaw.match(/\(?(vit[oó]ria|ganhou|win)\)?/i);
@@ -615,14 +645,12 @@ function parseMensagemPiloto(message) {
     else if (mDer) resultado = 'Derrota';
   }
 
-  // Limpa a ação removendo o resultado entre parênteses
   const acaoLimpa = acaoRaw
     ? acaoRaw.replace(/\s*\([^)]*\)\s*/g, '').replace(/["']/g, '').trim()
     : null;
 
   const acao = resolverAcao(acaoLimpa ?? acaoRaw) ?? acaoLimpa ?? acaoRaw;
 
-  // Formata data para DD/MM/AAAA
   let dataFormatada = null;
   if (dataRaw) {
     const m = dataRaw.match(/(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?/);
@@ -637,7 +665,6 @@ function parseMensagemPiloto(message) {
     }
   }
 
-  // Piloto vem do próprio autor da mensagem
   const pilotoNome = message.member?.displayName ?? message.author.username;
   const pilotoId   = message.member?.id ?? message.author.id;
 
@@ -651,7 +678,6 @@ function parseMensagemPiloto(message) {
   };
 }
 
-// ── Busca resultado nas pendências do canal de bot (ação + piloto + data) ────
 async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
   if (!process.env.PENDENCIAS_CHANNEL_ID) return null;
 
@@ -668,18 +694,15 @@ async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
       const parsed = parseEmbedPendencia(msg);
       if (!parsed?.resultado) continue;
 
-      // Score por ação
       const acaoParsed  = resolverAcao(parsed.acao) ?? parsed.acao ?? '';
       const acaoBusca   = resolverAcao(acao) ?? acao ?? '';
       const scoreAcao   = normalizar(acaoParsed) === normalizar(acaoBusca) ? 1.0
                         : dice(normalizar(acaoParsed), normalizar(acaoBusca));
       if (scoreAcao < 0.5) continue;
 
-      // Score por piloto
       const scorePiloto = dice(normalizar(stripPilotoId(parsed.piloto ?? '')), normalizar(stripPilotoId(pilotoNome ?? '')));
       if (scorePiloto < 0.3) continue;
 
-      // Score por data (opcional — se tiver data nas duas pontas compara, senão ignora)
       let scoreData = 0.5;
       if (dataFormatada && parsed.acao) {
         const dataMsg = extrairDataFormatadaDaMensagem(msg);
@@ -696,7 +719,7 @@ async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
     }
 
     if (melhorScore >= 0.55 && melhorResultado) {
-      console.log(`🔍 Resultado encontrado nas pendências: "${melhorResultado}" (score: ${Math.round(melhorScore * 100)}%)`);
+      console.log(`🔍 Resultado encontrado nas pendências: "${melhorResultado}"`);
       return melhorResultado;
     }
   } catch (err) {
@@ -706,15 +729,12 @@ async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
   return null;
 }
 
-// ── Helper: tenta encontrar pendência pelo nome do piloto da thread ──────────
 async function encontrarPendenciaPorThread(thread) {
-  // O nome da thread é "Avaliação — <displayName>"
   const match = thread.name?.match(/^Avalia[çc][aã]o\s*[—\-]\s*(.+)$/i);
   if (!match) return null;
 
   const nomePilotoThread = normalizar(match[1].trim());
 
-  // Procura pendência cujo piloto bate com o nome da thread
   let melhor = null, melhorScore = 0;
   for (const [, p] of pendencias.entries()) {
     if (!p.piloto) continue;
@@ -738,25 +758,26 @@ client.once('ready', async () => {
     try {
       await mainGuild.members.fetch();
       console.log(`✅ Cache carregado: ${mainGuild.name}`);
-    } catch (e) { console.warn(`⚠️  Cache falhou em ${mainGuild.name}:`, e.message); }
+    } catch (e) { console.warn(`⚠️  Cache falhou:`, e.message); }
   }
 
   loadLembretes();
-
-  // Verifica lembretes a cada hora
   setInterval(verificarLembretes, 60 * 60 * 1000);
-  // Roda uma vez logo no startup (após 1 min para dar tempo do cache carregar)
   setTimeout(verificarLembretes, 60 * 1000);
   console.log('⏰ Sistema de lembretes iniciado.');
+
+  // ── Cron: Enviar relatório semanal (quarta-feira às 00:00) ──
+  cron.schedule('0 0 * * 3', async () => {
+    console.log('📊 Executando envio de relatório semanal...');
+    await enviarRelatorioSemanal();
+  });
+  console.log('📅 Cron de relatório semanal agendado.');
 });
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
 
-// ── Sistema de lembretes de pendência ─────────────────────────────────────────
-// Roda a cada hora, manda DM pro piloto se a pendência tiver 24h+ sem resolver
-// e DM pro avaliador se o piloto postou vídeo mas não deu match
-
-const lembretes = new Map(); // pendenciaId -> { ultimoLembrete, avisoAvaliador }
+// ── Sistema de lembretes ──────────────────────────────────────────────────────
+const lembretes = new Map();
 
 function loadLembretes() {
   const LEMBRETES_PATH = path.join(DATA_DIR, 'lembretes.json');
@@ -787,40 +808,25 @@ async function verificarLembretes() {
     const diffHoras = (agora - new Date(p.timestamp)) / (1000 * 60 * 60);
     const diffDias  = diffHoras / 24;
 
-    // Fora da janela de 7 dias — ignora
     if (diffDias > 7) continue;
-
-    // Menos de 24h — ainda não precisa lembrar
     if (diffHoras < 24) continue;
 
     const estado = lembretes.get(id) ?? { ultimoLembrete: null, avisoAvaliador: false };
-
-    // Verifica se já passou 24h desde o último lembrete
     const horasDesdeUltimo = estado.ultimoLembrete
       ? (agora - new Date(estado.ultimoLembrete)) / (1000 * 60 * 60)
       : 999;
 
     if (horasDesdeUltimo < 24) continue;
 
-    // Tenta mandar DM pro piloto
     if (p.pilotoId) {
       try {
         const membro = guild?.members.cache.get(p.pilotoId)
           ?? await guild?.members.fetch(p.pilotoId).catch(() => null);
 
         if (membro) {
-          const msg =
-            `⏰ **Lembrete de ação pendente!**
-
-` +
-            `Você ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).
-` +
-            (canalUrl ? `
-Poste no canal: ${canalUrl}` : '');
-
+          const msg = `⏰ **Lembrete de ação pendente!**\n\nVocê ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).${canalUrl ? `\n\nPoste no canal: ${canalUrl}` : ''}`;
           await membro.send(msg);
           console.log(`⏰ Lembrete enviado: ${p.piloto} — ${p.acao}`);
-
           estado.ultimoLembrete = agora.toISOString();
           lembretes.set(id, estado);
           saveLembretes();
@@ -830,7 +836,6 @@ Poste no canal: ${canalUrl}` : '');
       }
     }
 
-    // Verifica se o piloto já postou vídeo mas não deu match (thread existe mas pendência continua)
     if (!estado.avisoAvaliador && p.pilotoId && diffDias >= 2) {
       try {
         const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID).catch(() => null);
@@ -843,23 +848,13 @@ Poste no canal: ${canalUrl}` : '');
           );
 
           if (temVideo) {
-            // Piloto postou mas não deu match — avisa avaliador
             const role = guild?.roles.cache.get(process.env.ALLOWED_ROLE_ID);
             if (role) {
               for (const [, avaliador] of role.members) {
                 if (avaliador.user.bot) continue;
                 try {
-                  await avaliador.send(
-                    `⚠️ **Validação manual necessária!**
-
-` +
-                    `O piloto **${p.piloto ?? '—'}** postou um vídeo mas a pendência **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}) não foi resolvida automaticamente.
-` +
-                    `ID da pendência: \`${id}\`
-` +
-                    `Use /resolver para marcar como resolvida se já foi avaliada.`
-                  );
-                } catch { /* DM fechada */ }
+                  await avaliador.send(`⚠️ **Validação manual necessária!**\n\nO piloto **${p.piloto ?? '—'}** postou um vídeo mas a pendência **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}) não foi resolvida automaticamente.\nID: \`${id}\`\nUse /resolver para marcar como resolvida.`);
+                } catch { }
               }
               console.log(`⚠️  Aviso enviado aos avaliadores: ${p.piloto} — ${p.acao}`);
             }
@@ -874,11 +869,76 @@ Poste no canal: ${canalUrl}` : '');
     }
   }
 
-  // Limpa lembretes de pendências já resolvidas
   for (const id of lembretes.keys()) {
     if (!pendencias.has(id)) lembretes.delete(id);
   }
   saveLembretes();
+}
+
+// ── Envio automático de relatório semanal ────────────────────────────────────
+async function enviarRelatorioSemanal() {
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (!guild) { console.warn('⚠️  Guild não encontrada'); return; }
+
+  const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+  if (!role) { console.warn('⚠️  Cargo de avaliador não encontrado'); return; }
+
+  // Semana atual (quarta a quarta)
+  const hoje = new Date();
+  const semanaStart = getWeekStart(hoje);
+  const semanaEnd = new Date(semanaStart);
+  semanaEnd.setDate(semanaEnd.getDate() + 7);
+
+  const statsRelatorios = getAvaliadosByPeriod(semanaStart, semanaEnd);
+  const pendenciasAbertos = [...pendencias.entries()]
+    .filter(([, p]) => {
+      const dias = (hoje - new Date(p.timestamp)) / (1000 * 60 * 60 * 24);
+      return dias <= 7;
+    });
+
+  // Monta mensagens
+  let msgRelatorios = `📊 **Relatório da Semana** (${semanaStart.toLocaleDateString('pt-BR')})\n\n`;
+
+  if (statsRelatorios.size === 0) {
+    msgRelatorios += 'Nenhuma ação registrada nesta semana.';
+  } else {
+    const sorted = [...statsRelatorios.entries()].sort((a, b) => b[1].acoes.length - a[1].acoes.length);
+    for (const [, stats] of sorted) {
+      const total = stats.acoes.length;
+      msgRelatorios += `**${stats.pilotoNome}** (${total} ação${total !== 1 ? 's' : ''})\n`;
+      msgRelatorios += `├─ ✅ ${stats.vitoria}x Vitória${stats.vitoria !== 1 ? 's' : ''}\n`;
+      msgRelatorios += `└─ ❌ ${stats.derrota}x Derrota${stats.derrota !== 1 ? 's' : ''}\n\n`;
+
+      // Lista de ações
+      for (const a of stats.acoes) {
+        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
+        msgRelatorios += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
+      }
+      msgRelatorios += '\n';
+    }
+  }
+
+  let msgPendencias = `📋 **Pendências em Aberto** (últimos 7 dias: ${pendenciasAbertos.length})\n\n`;
+  if (pendenciasAbertos.length === 0) {
+    msgPendencias += 'Nenhuma pendência em aberto!';
+  } else {
+    for (const [, p] of pendenciasAbertos) {
+      const data = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR');
+      msgPendencias += `> **${p.piloto ?? '—'}** - ${p.acao ?? '—'} (${data})\n`;
+    }
+  }
+
+  // Envia para todos os avaliadores
+  for (const [, membro] of role.members) {
+    if (membro.user.bot) continue;
+    try {
+      await membro.send(msgPendencias);
+      await membro.send(msgRelatorios);
+      console.log(`📊 Relatório semanal enviado para ${membro.displayName}`);
+    } catch (err) {
+      console.warn(`⚠️  Erro ao enviar relatório para ${membro.displayName}:`, err.message);
+    }
+  }
 }
 
 // ── Mensagens ─────────────────────────────────────────────────────────────────
@@ -892,13 +952,11 @@ client.on('messageCreate', async (message) => {
 
   if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
 
-  // Mensagens de piloto sem link/arquivo — tenta registrar como pendência pelo formato livre
   const temLink    = URL_REGEX.test(message.content);
   const temArquivo = message.attachments.size > 0;
   if (!temLink && !temArquivo) {
     const parsedPiloto = parseMensagemPiloto(message);
     if (parsedPiloto) {
-      // Verifica cargo de piloto antes de registrar
       const guild  = message.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
       const membro = guild?.members.cache.get(parsedPiloto.pilotoId);
       const temPilotoCargo    = membro?.roles.cache.has(process.env.PILOT_ROLE_ID);
@@ -914,7 +972,6 @@ client.on('messageCreate', async (message) => {
       }
 
       if (!pendencias.has(parsedPiloto.id) && !resolvidas.has(parsedPiloto.id)) {
-        // Se não extraiu resultado do texto, tenta buscar nas pendências do canal de bot
         let resultado = parsedPiloto.resultado;
         if (!resultado) {
           resultado = await buscarResultadoNasPendencias(
@@ -935,13 +992,12 @@ client.on('messageCreate', async (message) => {
           dataFormatada: parsedPiloto.dataFormatada ?? null,
         });
         savePendencias();
-        console.log(`📋 Pendência (piloto) registrada: ${parsedPiloto.piloto} — ${parsedPiloto.acao} | resultado: ${resultado ?? '—'} (data: ${parsedPiloto.dataFormatada ?? '—'})`);
+        console.log(`📋 Pendência (piloto) registrada: ${parsedPiloto.piloto} — ${parsedPiloto.acao}`);
       }
     }
     return;
   }
 
-  // Captura vídeo do piloto após /enviar
   if (temLink || temArquivo) {
     const authorId   = message.author.id;
     const envioState = pendingEnvio.get(authorId);
@@ -952,7 +1008,6 @@ client.on('messageCreate', async (message) => {
       const pilotoId   = envioState.pilotoId;
 
       try {
-        // Resolve pendência vinculada (se veio de um select)
         if (envioState.pendenciaId && pendencias.has(envioState.pendenciaId)) {
           resolverPendencia(envioState.pendenciaId);
           console.log(`✅ Pendência resolvida via /enviar: ${envioState.acao}`);
@@ -978,7 +1033,6 @@ client.on('messageCreate', async (message) => {
           components: [new ActionRowBuilder().addComponents(botao)],
         });
 
-        // Salva na thread os dados pré-preenchidos do /enviar
         threadSetupMsgs.set(thread.id, {
           setupMsgId:    setupMsg.id,
           originalMsgId: message.id,
@@ -997,10 +1051,7 @@ client.on('messageCreate', async (message) => {
         const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
         if (allowedRole) {
           const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
-          const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**
-
-**Postado por:** ${pilotoNome}
-**Acesse a thread:** ${threadLink}`;
+          const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${pilotoNome}\n**Acesse a thread:** ${threadLink}`;
           for (const [, member] of allowedRole.members) {
             if (member.user.bot) continue;
             try { await member.send(dmTexto); }
@@ -1030,8 +1081,6 @@ client.on('messageCreate', async (message) => {
           acaoDoVideo = resolverAcao(titulo);
           if (acaoDoVideo) {
             console.log(`🎯 Ação reconhecida: ${acaoDoVideo}`);
-          } else {
-            console.log(`⏭️  Título não corresponde a nenhuma ação conhecida: "${titulo}"`);
           }
           const dataDoTitulo = extrairDataDoTitulo(titulo);
           if (dataDoTitulo) {
@@ -1042,7 +1091,6 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // Se não extraiu ação/data pelo título do YouTube, tenta pelo corpo da mensagem
     const dadosMensagem = parseMensagemPiloto(message);
     if (dadosMensagem?.acao && !acaoDoVideo) {
       acaoDoVideo = dadosMensagem.acao;
@@ -1062,10 +1110,9 @@ client.on('messageCreate', async (message) => {
       : null;
 
     if (resolvida) {
-      console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao} (${Math.round(resolvida.score * 100)}%)`);
+      console.log(`✅ Pendência resolvida: ${resolvida.piloto} — ${resolvida.acao}`);
     }
 
-    // Dados pré-preenchidos: pendência resolvida > corpo da mensagem > título do YouTube
     const pilotoId  = message.member?.id ?? null;
     const preenchido = (resolvida || dadosMensagem?.acao) ? {
       pilotoId,
@@ -1085,8 +1132,6 @@ client.on('messageCreate', async (message) => {
       .setLabel('📋  Iniciar Avaliação')
       .setStyle(ButtonStyle.Primary);
 
-    // Monta mensagem de setup com todos os campos disponíveis num formato padronizado
-    // (usado também para recuperar dados após restart)
     let conteudoSetup = `## 📋 Avaliação de Piloto\nClique no botão abaixo para iniciar uma nova avaliação.`;
     if (resolvida || preenchido) {
       const acao      = resolvida?.acao      ?? preenchido?.acao      ?? '—';
@@ -1140,10 +1185,8 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  // Recupera threadData (sem defer ainda — pode precisar abrir modal)
   let threadData = threadSetupMsgs.get(interaction.channelId);
 
-  // Entra no bloco de recovery se não tem threadData OU se tem mas sem preenchido
   if (!threadData || !threadData.preenchido) {
     if (!threadData) console.log('⚠️  Dados não encontrados no cache, buscando na thread...');
     else console.log('⚠️  threadData sem preenchido, tentando recuperar da mensagem...');
@@ -1161,11 +1204,9 @@ async function abrirSelects(interaction) {
       const setupMsgId = setupMsg?.id ?? null;
 
       if (originalMsgId || setupMsgId) {
-        // Tenta recuperar dados pré-preenchidos do conteúdo da mensagem de setup
         let preenchidoRecuperado = null;
         if (setupMsg?.content) {
           const c = setupMsg.content;
-          // Extrai "Ação: X | Resultado: Y | Data: Z" ou "Piloto: P"
           const mAcao      = c.match(/\*\*Ação:\*\*\s*([^|\n]+)/);
           const mResultado = c.match(/\*\*Resultado:\*\*\s*([^|\n]+)/);
           const mData      = c.match(/\*\*Data:\*\*\s*([^|\n\>]+)/);
@@ -1176,7 +1217,6 @@ async function abrirSelects(interaction) {
           const data      = mData?.[1]?.trim().replace(/^—$/, '') || null;
           const pilotoNome = mPiloto?.[1]?.trim() || null;
 
-          // Tenta descobrir o pilotoId pelo nome
           let pilotoId = null;
           if (pilotoNome) {
             const guild  = interaction.guild;
@@ -1186,24 +1226,22 @@ async function abrirSelects(interaction) {
 
           if (acao || resultado || pilotoNome) {
             preenchidoRecuperado = { acao, resultado, data, pilotoNome, pilotoId };
-            console.log(`♻️  Dados pré-preenchidos recuperados da mensagem: ${pilotoNome} | ${acao} | ${resultado}`);
+            console.log(`♻️  Dados pré-preenchidos recuperados da mensagem: ${pilotoNome} | ${acao}`);
           }
         }
 
         threadData = { setupMsgId, originalMsgId, preenchido: preenchidoRecuperado };
         threadSetupMsgs.set(interaction.channelId, threadData);
         saveThreads();
-        console.log(`♻️  Dados recuperados: setupMsgId=${setupMsgId}, originalMsgId=${originalMsgId}`);
       }
     } catch (err) {
       console.warn('⚠️  Não foi possível recuperar dados da thread:', err.message);
     }
   }
 
-  // Tenta encontrar pendência relacionada à thread para pré-preencher dados
   const pendenciaDaThread = await encontrarPendenciaPorThread(interaction.channel);
   if (pendenciaDaThread) {
-    console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao} (data: ${pendenciaDaThread.dataFormatada ?? '—'})`);
+    console.log(`🔍 Pendência encontrada para thread: ${pendenciaDaThread.piloto} — ${pendenciaDaThread.acao}`);
   }
 
   const preenchido = threadData?.preenchido ?? null;
@@ -1217,7 +1255,6 @@ async function abrirSelects(interaction) {
   const temTudo = acaoFinal && resultadoFinal && pilotoNomeFinal;
 
   if (temTudo) {
-    // Tem tudo — pula os selects e abre o modal direto
     console.log(`⚡ Pulando selects — dados completos: ${pilotoNomeFinal} | ${acaoFinal} | ${resultadoFinal}`);
 
     pending.set(interaction.user.id, {
@@ -1255,7 +1292,6 @@ async function abrirSelects(interaction) {
     return;
   }
 
-  // Não tem tudo — mostra selects normalmente
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const role    = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
@@ -1321,7 +1357,6 @@ client.on('interactionCreate', async (interaction) => {
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
     const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
 
-    // Somente pilotos (ou avaliadores) podem usar
     const temPiloto    = member?.roles.cache.has(process.env.PILOT_ROLE_ID);
     const temAvaliador = member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
     if (!temPiloto && !temAvaliador) {
@@ -1329,7 +1364,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Busca pendências do próprio piloto ANTES de qualquer resposta
     const pilotoId   = interaction.user.id;
     const pilotoNome = member?.displayName ?? interaction.user.username;
     const agora      = new Date();
@@ -1343,7 +1377,6 @@ client.on('interactionCreate', async (interaction) => {
       .sort((a, b) => new Date(b[1].timestamp) - new Date(a[1].timestamp));
 
     if (minhasPendencias.length === 0) {
-      // Sem pendências — modal tem que ser a PRIMEIRA resposta (sem defer antes)
       pendingEnvio.set(interaction.user.id, {
         pilotoId,
         pilotoNome,
@@ -1372,7 +1405,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Com pendências — aí sim pode defer e mostrar select
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const opcoes = minhasPendencias.slice(0, 25).map(([id, p]) => {
@@ -1404,19 +1436,15 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    const emDM = !interaction.guild;
-    // Responde imediatamente para não estourar o timeout de 3s do Discord
-    await interaction.reply({ content: '⏳ Importando e verificando pendências...', flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: '⏳ Verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
-      // Busca mensagens do canal de pendências
       const msgsPendencias = process.env.PENDENCIAS_CHANNEL_ID
         ? await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID)
             .then(canal => canal.messages.fetch({ limit: 100 }))
             .catch(() => null)
         : null;
 
-      // Import de pendências do canal de bot em paralelo
       let importados = 0;
       if (msgsPendencias) {
         const promises = [];
@@ -1427,13 +1455,12 @@ client.on('interactionCreate', async (interaction) => {
         await Promise.all(promises);
       }
 
-      // Auto-resolve pendências cruzando contra avaliados.json (piloto + ação + data exata)
       let autoResolvidas = 0;
       for (const [id, p] of [...pendencias.entries()]) {
         if (jaFoiAvaliadoPorLista(p.pilotoId, p.acao, p.dataFormatada)) {
           resolverPendencia(id);
           autoResolvidas++;
-          console.log(`⏭️  Auto-resolvida por avaliados.json: ${p.piloto} — ${p.acao} (${p.dataFormatada})`);
+          console.log(`⏭️  Auto-resolvida: ${p.piloto} — ${p.acao}`);
         }
       }
       if (autoResolvidas > 0) {
@@ -1463,7 +1490,7 @@ client.on('interactionCreate', async (interaction) => {
         linhas.push(
           `> **Piloto:** ${p.piloto ?? '—'}\n` +
           `> **Ação:** ${p.acao ?? '—'} | **Resultado:** ${p.resultado ?? '—'}\n` +
-          `> **Data:** ${data} | ID: \`${id}\` | 🔗 [Ver envio](${p.messageUrl})\n`
+          `> **Data:** ${data} | 🔗 [Ver envio](${p.messageUrl})\n`
         );
       }
 
@@ -1480,40 +1507,165 @@ client.on('interactionCreate', async (interaction) => {
 
     } catch (err) {
       console.error('❌ Erro em /pendencias:', err.message);
-      try { await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' }); } catch { /* já respondido */ }
+      try { await interaction.editReply({ content: '❌ Não consegui te enviar DM. Verifique se seus DMs estão abertos.' }); } catch { }
     }
     return;
   }
 
-  // ── Select /pendencias — resolver múltiplas ────────────────────────────────
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('sel_resolver_pendencias')) {
+  // ── /relatorios (semana atual) ────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'relatorios') {
     if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
       return;
     }
 
-    const ids = interaction.values;
-    const resultados = [];
-    let okCount = 0, failCount = 0;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    for (const id of ids) {
-      if (!pendencias.has(id)) {
-        resultados.push(`❌ \`${id}\` — não encontrada`);
-        failCount++;
-        continue;
-      }
-      const p = pendencias.get(id);
-      resolverPendencia(id);
-      resultados.push(`✅ ${p.piloto ?? '—'} — ${p.acao ?? '—'} (${p.dataFormatada ?? '—'})`);
-      okCount++;
+    const hoje = new Date();
+    const semanaStart = getWeekStart(hoje);
+    const semanaEnd = new Date(semanaStart);
+    semanaEnd.setDate(semanaEnd.getDate() + 7);
+
+    const stats = getAvaliadosByPeriod(semanaStart, semanaEnd);
+
+    if (stats.size === 0) {
+      await interaction.editReply('📊 **Nenhuma ação registrada nesta semana.**');
+      return;
     }
 
-    const resumo = `**${okCount} resolvida(s)${failCount > 0 ? ', ' + failCount + ' não encontrada(s)' : ''}**\n\n`;
-    await interaction.update({
-      content: resumo + resultados.join('\n'),
-      components: [],
+    const sorted = [...stats.entries()].sort((a, b) => b[1].acoes.length - a[1].acoes.length);
+
+    let msg = `📊 **Relatório da Semana** (${semanaStart.toLocaleDateString('pt-BR')})\n\n`;
+    for (const [, st] of sorted) {
+      const total = st.acoes.length;
+      msg += `**${st.pilotoNome}** (${total} ação${total !== 1 ? 's' : ''})\n`;
+      msg += `├─ ✅ ${st.vitoria}x Vitória${st.vitoria !== 1 ? 's' : ''}\n`;
+      msg += `└─ ❌ ${st.derrota}x Derrota${st.derrota !== 1 ? 's' : ''}\n\n`;
+
+      for (const a of st.acoes) {
+        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
+        msg += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
+      }
+      msg += '\n';
+    }
+
+    await interaction.editReply(msg.length > 2000 ? msg.slice(0, 1997) + '...' : msg);
+    return;
+  }
+
+  // ── /historico (totais) ────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'historico') {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const stats = getTotalAvaliadosStats();
+
+    if (stats.size === 0) {
+      await interaction.editReply('📊 **Nenhuma ação registrada no histórico.**');
+      return;
+    }
+
+    const sorted = [...stats.entries()].sort((a, b) => b[1].total - a[1].total);
+
+    let msg = `📊 **Histórico Completo (Total de Ações)\n\n`;
+    for (const [, st] of sorted) {
+      msg += `**${st.pilotoNome}** (${st.total} ação${st.total !== 1 ? 's' : ''})\n`;
+      msg += `├─ ✅ ${st.vitoria}x Vitória${st.vitoria !== 1 ? 's' : ''}\n`;
+      msg += `└─ ❌ ${st.derrota}x Derrota${st.derrota !== 1 ? 's' : ''}\n\n`;
+    }
+
+    await interaction.editReply(msg.length > 2000 ? msg.slice(0, 1997) + '...' : msg);
+    return;
+  }
+
+  // ── /ranking-semanal ──────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'ranking-semanal') {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const hoje = new Date();
+    const semanaStart = getWeekStart(hoje);
+    const semanaEnd = new Date(semanaStart);
+    semanaEnd.setDate(semanaEnd.getDate() + 7);
+
+    const stats = getAvaliadosByPeriod(semanaStart, semanaEnd);
+
+    if (stats.size === 0) {
+      await interaction.editReply('📊 **Nenhuma ação registrada nesta semana.**');
+      return;
+    }
+
+    const byTotal = [...stats.entries()].sort((a, b) => b[1].acoes.length - a[1].acoes.length).slice(0, 3);
+    const byVit = [...stats.entries()].sort((a, b) => b[1].vitoria - a[1].vitoria).slice(0, 3);
+    const byDer = [...stats.entries()].sort((a, b) => b[1].derrota - a[1].derrota).slice(0, 3);
+
+    let msg = `🏆 **Ranking Semanal** (${semanaStart.toLocaleDateString('pt-BR')})\n\n`;
+    
+    msg += `**📊 Mais Ações**\n`;
+    byTotal.forEach((,[st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.acoes.length}\n`;
     });
-    console.log(`✅ Resolver via select: ${okCount} ok, ${failCount} falha (por ${interaction.user.tag})`);
+    
+    msg += `\n**✅ Mais Vitórias**\n`;
+    byVit.forEach(([, st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.vitoria}\n`;
+    });
+    
+    msg += `\n**❌ Mais Derrotas**\n`;
+    byDer.forEach(([, st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.derrota}\n`;
+    });
+
+    await interaction.editReply(msg);
+    return;
+  }
+
+  // ── /ranking (totais) ──────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'ranking') {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const stats = getTotalAvaliadosStats();
+
+    if (stats.size === 0) {
+      await interaction.editReply('📊 **Nenhuma ação registrada.**');
+      return;
+    }
+
+    const byTotal = [...stats.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 3);
+    const byVit = [...stats.entries()].sort((a, b) => b[1].vitoria - a[1].vitoria).slice(0, 3);
+    const byDer = [...stats.entries()].sort((a, b) => b[1].derrota - a[1].derrota).slice(0, 3);
+
+    let msg = `🏆 **Ranking Geral (Período Completo)**\n\n`;
+    
+    msg += `**📊 Mais Ações**\n`;
+    byTotal.forEach(([, st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.total}\n`;
+    });
+    
+    msg += `\n**✅ Mais Vitórias**\n`;
+    byVit.forEach(([, st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.vitoria}\n`;
+    });
+    
+    msg += `\n**❌ Mais Derrotas**\n`;
+    byDer.forEach(([, st], i) => {
+      msg += `${i+1}️⃣ ${st.pilotoNome}: ${st.derrota}\n`;
+    });
+
+    await interaction.editReply(msg);
     return;
   }
 
@@ -1532,7 +1684,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Divide em grupos de 25 (limite do Discord por select), máx 5 ActionRows
     const grupos = [];
     for (let i = 0; i < Math.min(lista.length, 125); i += 25) {
       grupos.push(lista.slice(i, i + 25));
@@ -1549,7 +1700,7 @@ client.on('interactionCreate', async (interaction) => {
       return new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
           .setCustomId(`sel_resolver_pendencias_${idx}`)
-          .setPlaceholder(grupos.length > 1 ? `Grupo ${idx + 1} de ${grupos.length} — Selecione...` : 'Selecione uma ou mais...')
+          .setPlaceholder(grupos.length > 1 ? `Grupo ${idx + 1} de ${grupos.length}` : 'Selecione uma ou mais...')
           .setMinValues(1)
           .setMaxValues(opcoes.length)
           .addOptions(opcoes)
@@ -1564,7 +1715,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── /limpar_pendencias ──────────────────────────────────────────────────
+  // ── /limpar_pendencias ─────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'limpar_pendencias') {
     if (!await verificarPermissao(interaction.user.id)) {
       await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
@@ -1582,7 +1733,39 @@ client.on('interactionCreate', async (interaction) => {
       flags: MessageFlags.Ephemeral,
     });
 
-    console.log(`🗑️  Pendências limpas: ${total} removida(s) (por ${interaction.user.tag})`);
+    console.log(`🗑️  Pendências limpas: ${total} removida(s)`);
+    return;
+  }
+
+  // ── Select resolver ───────────────────────────────────────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('sel_resolver_pendencias')) {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const ids = interaction.values;
+    const resultados = [];
+    let okCount = 0, failCount = 0;
+
+    for (const id of ids) {
+      if (!pendencias.has(id)) {
+        resultados.push(`❌ \`${id}\` — não encontrada`);
+        failCount++;
+        continue;
+      }
+      const p = pendencias.get(id);
+      resolverPendencia(id);
+      resultados.push(`✅ ${p.piloto ?? '—'} — ${p.acao ?? '—'}`);
+      okCount++;
+    }
+
+    const resumo = `**${okCount} resolvida(s)${failCount > 0 ? ', ' + failCount + ' não encontrada(s)' : ''}**\n\n`;
+    await interaction.update({
+      content: resumo + resultados.join('\n'),
+      components: [],
+    });
+    console.log(`✅ Resolver: ${okCount} ok, ${failCount} falha`);
     return;
   }
 
@@ -1611,19 +1794,15 @@ client.on('interactionCreate', async (interaction) => {
     const resultado = p?.resultado ?? '—';
 
     await interaction.update({
-      content: `✅ **Selecionado:** ${acao} — ${data} (${resultado})
-
-Agora **envie o vídeo** aqui no canal de ações.`,
+      content: `✅ **Selecionado:** ${acao} — ${data} (${resultado})\n\nAgora **envie o vídeo** aqui no canal de ações.`,
       components: [],
     });
 
-    // Aguarda o vídeo: abre uma coleta por DM ou aguarda a próxima mensagem no canal
-    // Registra o estado para capturar a próxima mensagem com vídeo do piloto
     pendingEnvio.set(interaction.user.id, { ...state, aguardandoVideo: true, channelId: interaction.channelId });
     return;
   }
 
-  // ── Modal /enviar manual (sem pendências) ────────────────────────────────────
+  // ── Modal /enviar manual ──────────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId === 'enviar_manual') {
     const state = pendingEnvio.get(interaction.user.id);
     if (!state) { await interaction.reply({ content: '❌ Sessão expirada.', flags: MessageFlags.Ephemeral }); return; }
@@ -1640,9 +1819,7 @@ Agora **envie o vídeo** aqui no canal de ações.`,
     pendingEnvio.set(interaction.user.id, state);
 
     await interaction.reply({
-      content: `✅ **Registrado:** ${state.acao} — ${state.data}${state.resultado ? ' (' + state.resultado + ')' : ''}
-
-Agora **envie o vídeo** aqui no canal de ações.`,
+      content: `✅ **Registrado:** ${state.acao} — ${state.data}${state.resultado ? ' (' + state.resultado + ')' : ''}\n\nAgora **envie o vídeo** aqui no canal de ações.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1667,7 +1844,6 @@ Agora **envie o vídeo** aqui no canal de ações.`,
   // ── Botão "Abrir formulário" ──────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'btn_abrir_form') {
     const state = pending.get(interaction.user.id);
-    // Fallback de resultado e ação dos dados pré-preenchidos (/enviar ou pendência)
     if (!state.resultado && state.resultadoPendencia) {
       state.resultado = state.resultadoPendencia;
       console.log(`🔄 Resultado preenchido via fallback: ${state.resultado}`);
@@ -1685,11 +1861,10 @@ Agora **envie o vídeo** aqui no canal de ações.`,
       return;
     }
 
-    // Fallback: se avaliador não selecionou piloto no select, usa o da pendência
     if (!state.pilotoNome && state.pilotoNomePendencia) {
       state.pilotoNome = state.pilotoNomePendencia;
       state.pilotoId   = state.pilotoIdPendencia ?? null;
-      console.log(`🔄 Piloto preenchido via fallback de pendência: ${state.pilotoNome}`);
+      console.log(`🔄 Piloto preenchido via fallback: ${state.pilotoNome}`);
     }
 
     if (!state.pilotoNome) {
@@ -1708,7 +1883,7 @@ Agora **envie o vídeo** aqui no canal de ações.`,
           .setLabel('Data')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('Ex: 20/03/2026')
-          .setValue(state.dataFormatada ?? '')   // ← pré-preenchido
+          .setValue(state.dataFormatada ?? '')
           .setRequired(true)
       ),
       new ActionRowBuilder().addComponents(
@@ -1770,7 +1945,7 @@ Agora **envie o vídeo** aqui no canal de ações.`,
       });
       await interaction.update({ content: `✅ Relatório postado e enviado por DM para **${dmData.pilotoNome}**!`, components: [] });
     } catch {
-      await interaction.update({ content: `✅ Relatório postado, mas não foi possível enviar DM para **${dmData.pilotoNome}** (pode estar com DMs fechadas).`, components: [] });
+      await interaction.update({ content: `✅ Relatório postado, mas não foi possível enviar DM para **${dmData.pilotoNome}**.`, components: [] });
     } finally {
       fs.unlink(dmData.imagePath, () => {});
     }
@@ -1823,15 +1998,47 @@ async function gerarEPostar(interaction, dados) {
 
     await canal.send({ files: [imagePath] });
 
-    // Registra no avaliados.json para cruzamento futuro de pendências
+    // ── Enviar para canal de relatórios ──
+    const canalRelatorios = client.channels.cache.get('1514708221867196627');
+    if (canalRelatorios) {
+      const mencaoPiloto = dados.pilotoId ? `<@${dados.pilotoId}>` : dados.pilotoNome;
+      const linkOriginal = dados.originalMsgId 
+        ? `https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${dados.originalMsgId}`
+        : null;
+
+      const embed = {
+        color: 0x00b4d8,
+        fields: [
+          { name: 'Data', value: dados.data || '—', inline: true },
+          { name: 'Ação', value: dados.acao || '—', inline: true },
+          { name: 'Piloto', value: mencaoPiloto, inline: true },
+          ...(linkOriginal ? [{ name: 'Link do Envio', value: `[Ver mensagem](${linkOriginal})`, inline: false }] : []),
+        ],
+        image: { url: 'attachment://relatorio.png' },
+        timestamp: new Date(),
+      };
+
+      try {
+        await canalRelatorios.send({ 
+          embeds: [embed],
+          files: [imagePath],
+        });
+        console.log(`📊 Relatório enviado para canal de relatórios: ${dados.pilotoNome} — ${dados.acao}`);
+      } catch (err) {
+        console.warn('⚠️  Erro ao enviar para canal de relatórios:', err.message);
+      }
+    }
+
     if (dados.pilotoId && dados.acao && dados.data) {
       registrarAvaliado({
         pilotoId:   dados.pilotoId,
         pilotoNome: dados.pilotoNome,
         acao:       dados.acao,
         data:       dados.data,
+        resultado:  dados.resultado,
+        messageId:  dados.originalMsgId,
       });
-      console.log(`📝 Avaliado registrado: ${dados.pilotoNome} — ${dados.acao} (${dados.data})`);
+      console.log(`📝 Avaliado registrado: ${dados.pilotoNome} — ${dados.acao}`);
     }
 
     if (dados.pilotoId) {
@@ -1860,7 +2067,7 @@ async function gerarEPostar(interaction, dados) {
     }
   } catch (err) {
     console.error('❌ Erro em gerarEPostar:', err);
-    try { await interaction.editReply({ content: `❌ Erro: ${err.message}` }); } catch { /* interaction pode ter expirado */ }
+    try { await interaction.editReply({ content: `❌ Erro: ${err.message}` }); } catch { }
   }
 }
 
