@@ -776,6 +776,33 @@ client.once('ready', async () => {
 
 client.on('error', (err) => console.error('Erro no client:', err.message));
 
+// ── Helper: envia log para canal de auditoria ───────────────────────────────
+async function enviarLog(tipo, dados) {
+  const canalLog = client.channels.cache.get(process.env.LOG_CHANNEL_ID);
+  if (!canalLog) {
+    console.warn('⚠️  Canal de log não encontrado');
+    return;
+  }
+
+  try {
+    const embed = {
+      color: 0x00b4d8,
+      title: tipo,
+      fields: [
+        { name: 'Piloto', value: dados.piloto ?? '—', inline: true },
+        { name: 'Ação', value: dados.acao ?? '—', inline: true },
+        { name: 'Data', value: dados.data ?? '—', inline: true },
+      ],
+      timestamp: new Date(),
+    };
+
+    await canalLog.send({ embeds: [embed] });
+    console.log(`📝 Log registrado: ${tipo}`);
+  } catch (err) {
+    console.warn('⚠️  Erro ao enviar log:', err.message);
+  }
+}
+
 // ── Sistema de lembretes ──────────────────────────────────────────────────────
 const lembretes = new Map();
 
@@ -827,6 +854,14 @@ async function verificarLembretes() {
           const msg = `⏰ **Lembrete de ação pendente!**\n\nVocê ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).${canalUrl ? `\n\nPoste no canal: ${canalUrl}` : ''}`;
           await membro.send(msg);
           console.log(`⏰ Lembrete enviado: ${p.piloto} — ${p.acao}`);
+          
+          // Registra no log
+          await enviarLog('⏰ Lembrete de PENDÊNCIA Enviado', {
+            piloto: p.piloto,
+            acao: p.acao,
+            data: p.dataFormatada,
+          });
+          
           estado.ultimoLembrete = agora.toISOString();
           lembretes.set(id, estado);
           saveLembretes();
