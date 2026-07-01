@@ -131,6 +131,20 @@ function saveResolvidas() {
 }
 
 function resolverPendencia(id) {
+  const p = pendencias.get(id);
+
+  if (p && p.pilotoId && p.acao && p.dataFormatada) {
+    registrarAvaliado({
+      pilotoId:   p.pilotoId,
+      pilotoNome: p.piloto,
+      acao:       p.acao,
+      data:       p.dataFormatada,
+      resultado:  p.resultado,
+      messageId:  p.messageId,
+    });
+    console.log(`📝 Avaliado registrado via resolução de pendência: ${p.piloto} — ${p.acao}`);
+  }
+
   pendencias.delete(id);
   resolvidas.add(id);
   savePendencias();
@@ -1442,11 +1456,13 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const opcoes = minhasPendencias.slice(0, 25).map(([id, p]) => {
+    const opcoes = minhasPendencias.slice(0, 24).map(([id, p]) => {
       const data  = p.dataFormatada ?? new Date(p.timestamp).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
       const label = `${p.acao ?? '—'} — ${data}${p.resultado ? ' (' + p.resultado + ')' : ''}`;
       return { label: label.slice(0, 100), value: id };
     });
+
+    opcoes.push({ label: '🖊️  Nenhuma dessas — enviar manualmente', value: 'manual' });
 
     pendingEnvio.set(interaction.user.id, { pilotoId, pilotoNome });
 
@@ -1815,7 +1831,29 @@ client.on('interactionCreate', async (interaction) => {
     const state = pendingEnvio.get(interaction.user.id);
     if (!state) { await interaction.deferUpdate(); return; }
 
-    const pendenciaId = interaction.values[0];
+    const valorSelecionado = interaction.values[0];
+
+    if (valorSelecionado === 'manual') {
+      const modal = new ModalBuilder().setCustomId('enviar_manual').setTitle('Enviar Ação');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_acao').setLabel('Ação').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Ex: Fleeca Shopping').setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_data').setLabel('Data').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Ex: 30/05/2026').setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('env_resultado').setLabel('Resultado').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Vitória ou Derrota').setRequired(false)
+        ),
+      );
+      await interaction.showModal(modal);
+      return;
+    }
+
+    const pendenciaId = valorSelecionado;
     const p           = pendencias.get(pendenciaId);
 
     state.pendenciaId = pendenciaId;
