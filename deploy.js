@@ -5,11 +5,15 @@ const {
   SlashCommandBuilder,
   InteractionContextType,
 } = require('discord.js');
+const avaliarCmd = require('./avaliar');
 
 // Contextos onde o comando pode ser usado: dentro do servidor E em DM com o bot
 const CONTEXTS = [InteractionContextType.Guild, InteractionContextType.BotDM];
 
 const commands = [
+
+  avaliarCmd.buildCommand(), // /avaliar — guild-only (definido no próprio avaliar.js)
+
   new SlashCommandBuilder()
     .setName('pendencias')
     .setDescription('Lista as pendências de envio em aberto (últimos 7 dias)')

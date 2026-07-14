@@ -13,6 +13,7 @@ const {
   EmbedBuilder,
 } = require('discord.js');
 const { generateReportImage } = require('./generateImage');
+const avaliarCmd = require('./avaliar');
 const cron = require('node-cron');
 const fs   = require('fs');
 const path = require('path');
@@ -1400,6 +1401,8 @@ async function abrirSelects(interaction) {
 
 // ── Interactions ───────────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
+
+  if (await avaliarCmd.handleInteraction(interaction, client)) return;
 
   // ── /enviar ───────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'enviar') {
