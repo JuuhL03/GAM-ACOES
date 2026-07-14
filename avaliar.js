@@ -3,6 +3,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -18,6 +19,10 @@ const { generateEstagio } = require('./generateEstagio');
 // ── Cargos (podem ser sobrescritos via .env) ───────────────────────────────
 const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1526372144794042498';
 const ESTAGIO_ROLE_ID   = process.env.ESTAGIO_ROLE_ID   || '1516985250666774729';
+
+// Cargo usado para filtrar a lista de sugestões do campo "membro" (autocomplete).
+// Só aparecem no autocomplete os membros que tiverem este cargo.
+const FILTRO_MEMBRO_ROLE_ID = process.env.FILTRO_MEMBRO_ROLE_ID || '1329101772223942751';
 
 // Canal onde a ficha é postada publicamente (opcional).
 // Se não configurado, a ficha é postada no próprio canal do comando.
@@ -68,11 +73,24 @@ function buildCommand() {
   return new SlashCommandBuilder()
     .setName('avaliar')
     .setDescription('Avalia um estagiário do Grupamento Aeromóvel')
-    .addUserOption(opt =>
-      opt.setName('membro')
-        .setDescription('Estagiário que será avaliado')
-        .setRequired(true))
     .setContexts([InteractionContextType.Guild]);
+}
+
+function montarSelectMembro(candidatos) {
+  const grupos = [];
+  for (let i = 0; i < Math.min(candidatos.length, 125); i += 25) {
+    grupos.push(candidatos.slice(i, i + 25));
+  }
+
+  return grupos.map((grupo, idx) => {
+    const opcoes = grupo.map(m => ({ label: m.displayName.slice(0, 100), value: m.id }));
+    return new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`aval_sel_membro_${idx}`)
+        .setPlaceholder(grupos.length > 1 ? `Grupo ${idx + 1} de ${grupos.length}` : 'Selecione o estagiário...')
+        .addOptions(opcoes)
+    );
+  });
 }
 
 function montarPassoAtual(state) {
@@ -93,11 +111,11 @@ function montarPassoAtual(state) {
     )
   );
 
-  return { embeds: [embed], components: [row] };
+  return { content: '', embeds: [embed], components: [row] };
 }
 
 async function handleInteraction(interaction, client) {
-  // ── /avaliar ───────────────────────────────────────────────────────────
+  // ── /avaliar → mostra select com os membros elegíveis ────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'avaliar') {
     const guild = interaction.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
 
@@ -107,29 +125,51 @@ async function handleInteraction(interaction, client) {
       return true;
     }
 
-    const alvoUser = interaction.options.getUser('membro', true);
-    const alvoMember = await guild?.members.fetch(alvoUser.id).catch(() => null);
+    const role = guild?.roles.cache.get(FILTRO_MEMBRO_ROLE_ID);
+    const candidatos = role ? [...role.members.values()] : [];
+
+    if (!candidatos.length) {
+      await interaction.reply({ content: '❌ Nenhum membro encontrado com o cargo configurado. Verifique `FILTRO_MEMBRO_ROLE_ID`.', flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    await interaction.reply({
+      content: '📋 **Selecione o estagiário que será avaliado:**',
+      components: montarSelectMembro(candidatos),
+      flags: MessageFlags.Ephemeral,
+    });
+    return true;
+  }
+
+  // ── Seleção do estagiário → valida cargo e inicia o primeiro critério ────
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('aval_sel_membro')) {
+    const guild = interaction.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
+    const alvoId = interaction.values[0];
+    const alvoMember = await guild?.members.fetch(alvoId).catch(() => null);
+
     if (!alvoMember) {
-      await interaction.reply({ content: '❌ Não encontrei esse membro no servidor.', flags: MessageFlags.Ephemeral });
+      await interaction.update({ content: '❌ Não encontrei esse membro no servidor.', components: [] });
       return true;
     }
 
     if (!alvoMember.roles.cache.has(ESTAGIO_ROLE_ID)) {
-      await interaction.reply({ content: '❌ Esse membro não possui o cargo de Estágio.', flags: MessageFlags.Ephemeral });
+      await interaction.update({ content: '❌ Esse membro não possui o cargo de Estágio.', components: [] });
       return true;
     }
+
+    const avaliadorMember = interaction.member ?? await guild?.members.fetch(interaction.user.id).catch(() => null);
 
     const state = {
       alvoId: alvoMember.id,
       alvoNome: alvoMember.displayName,
       avatarUrl: alvoMember.displayAvatarURL({ extension: 'png', size: 256 }),
-      avaliadorNome: avaliadorMember.displayName,
+      avaliadorNome: avaliadorMember?.displayName ?? interaction.user.username,
       criterios: CRITERIOS_ESTAGIO.map(c => ({ label: c.label, conceito: null })),
       indice: 0,
     };
     emAndamento.set(interaction.user.id, state);
 
-    await interaction.reply({ ...montarPassoAtual(state), flags: MessageFlags.Ephemeral });
+    await interaction.update(montarPassoAtual(state));
     return true;
   }
 
