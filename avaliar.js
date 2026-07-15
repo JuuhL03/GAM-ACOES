@@ -125,11 +125,11 @@ async function handleInteraction(interaction, client) {
       return true;
     }
 
-    const role = guild?.roles.cache.get(FILTRO_MEMBRO_ROLE_ID);
+    const role = guild?.roles.cache.get(ESTAGIO_ROLE_ID);
     const candidatos = role ? [...role.members.values()] : [];
 
     if (!candidatos.length) {
-      await interaction.reply({ content: '❌ Nenhum membro encontrado com o cargo configurado. Verifique `FILTRO_MEMBRO_ROLE_ID`.', flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: '❌ Nenhum membro encontrado com o cargo de Estágio. Verifique `ESTAGIO_ROLE_ID`.', flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -149,11 +149,6 @@ async function handleInteraction(interaction, client) {
 
     if (!alvoMember) {
       await interaction.update({ content: '❌ Não encontrei esse membro no servidor.', components: [] });
-      return true;
-    }
-
-    if (!alvoMember.roles.cache.has(ESTAGIO_ROLE_ID)) {
-      await interaction.update({ content: '❌ Esse membro não possui o cargo de Estágio.', components: [] });
       return true;
     }
 

@@ -128,7 +128,7 @@ const S = {
  *   observacao: string,  // opcional
  * }
  */
-async function generateFichaMilitar(dados) {
+async function generateEstagio(dados) {
   await ensureFonts();
 
   const tmp = createCanvas(10, 10);
@@ -321,4 +321,4 @@ async function generateFichaMilitar(dados) {
   return outPath;
 }
 
-module.exports = { generateFichaMilitar };
+module.exports = { generateEstagio };
