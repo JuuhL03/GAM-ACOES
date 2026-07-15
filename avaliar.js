@@ -66,6 +66,13 @@ function dataHojeBR() {
   return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 }
 
+// ── Helper: busca membro priorizando cache (evita chamada de rede desnecessária) ──
+async function buscarMembro(guild, userId) {
+  if (!guild || !userId) return null;
+  return guild.members.cache.get(userId)
+    ?? await guild.members.fetch(userId).catch(() => null);
+}
+
 // ── Estado em memória das avaliações em andamento (uma por avaliador) ──────
 const emAndamento = new Map(); // key = avaliadorId
 
@@ -119,7 +126,7 @@ async function handleInteraction(interaction, client) {
   if (interaction.isChatInputCommand() && interaction.commandName === 'avaliar') {
     const guild = interaction.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
 
-    const avaliadorMember = await guild?.members.fetch(interaction.user.id).catch(() => null);
+    const avaliadorMember = await buscarMembro(guild, interaction.user.id);
     if (!avaliadorMember?.roles.cache.has(AVALIADOR_ROLE_ID)) {
       await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
       return true;
@@ -145,14 +152,14 @@ async function handleInteraction(interaction, client) {
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('aval_sel_membro')) {
     const guild = interaction.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
     const alvoId = interaction.values[0];
-    const alvoMember = await guild?.members.fetch(alvoId).catch(() => null);
+    const alvoMember = await buscarMembro(guild, alvoId);
 
     if (!alvoMember) {
       await interaction.update({ content: '❌ Não encontrei esse membro no servidor.', components: [] });
       return true;
     }
 
-    const avaliadorMember = interaction.member ?? await guild?.members.fetch(interaction.user.id).catch(() => null);
+    const avaliadorMember = interaction.member ?? await buscarMembro(guild, interaction.user.id);
 
     const state = {
       alvoId: alvoMember.id,
@@ -251,7 +258,8 @@ async function handleInteraction(interaction, client) {
 
     const attachment = new AttachmentBuilder(imagePath, { name: 'ficha_avaliacao.png' });
     const canalDestino = AVALIACOES_CHANNEL_ID
-      ? await client.channels.fetch(AVALIACOES_CHANNEL_ID).catch(() => null)
+      ? (client.channels.cache.get(AVALIACOES_CHANNEL_ID)
+          ?? await client.channels.fetch(AVALIACOES_CHANNEL_ID).catch(() => null))
       : interaction.channel;
 
     if (canalDestino) {

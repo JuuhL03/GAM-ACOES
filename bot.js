@@ -217,10 +217,17 @@ function getTotalAvaliadosStats() {
   return stats;
 }
 
+// ── Helper: busca membro priorizando cache (evita chamada de rede desnecessária) ──
+async function buscarMembro(guild, userId) {
+  if (!guild || !userId) return null;
+  return guild.members.cache.get(userId)
+    ?? await guild.members.fetch(userId).catch(() => null);
+}
+
 // ── Helper: verifica permissão ────────────────────────────────────────────────
 async function verificarPermissao(userId) {
   const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-  const member = await guild?.members.fetch(userId).catch(() => null);
+  const member = await buscarMembro(guild, userId);
   return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
 }
 
@@ -246,12 +253,15 @@ async function construirMapaAvaliadas(limit = 200) {
 
       for (const [, msg] of batch) {
         if (!msg.reactions.cache.size) continue;
-        let foiAvaliada = false;
 
-        for (const reacao of msg.reactions.cache.values()) {
-          if (reacao.me) { foiAvaliada = true; break; }
-          const usuarios = await reacao.users.fetch({ limit: 20 }).catch(() => null);
-          if (usuarios?.some(u => avaliadoresIds.has(u.id))) { foiAvaliada = true; break; }
+        const reacoes = [...msg.reactions.cache.values()];
+        let foiAvaliada = reacoes.some(r => r.me);
+
+        if (!foiAvaliada) {
+          const listas = await Promise.all(
+            reacoes.map(r => r.users.fetch({ limit: 20 }).catch(() => null))
+          );
+          foiAvaliada = listas.some(usuarios => usuarios?.some(u => avaliadoresIds.has(u.id)));
         }
 
         if (foiAvaliada) {
@@ -287,14 +297,18 @@ async function jaFoiAvaliadaIndividual(msg) {
     const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
     if (!msgs) return false;
     const authorId = msg.author?.id;
+
     for (const [, m] of msgs) {
       if (m.author?.id !== authorId) continue;
       if (!m.reactions.cache.size) continue;
-      for (const reacao of m.reactions.cache.values()) {
-        if (reacao.me) return true;
-        const usuarios = await reacao.users.fetch({ limit: 10 }).catch(() => null);
-        if (usuarios?.some(u => avaliadoresIds.has(u.id))) return true;
-      }
+
+      const reacoes = [...m.reactions.cache.values()];
+      if (reacoes.some(r => r.me)) return true;
+
+      const listas = await Promise.all(
+        reacoes.map(r => r.users.fetch({ limit: 10 }).catch(() => null))
+      );
+      if (listas.some(usuarios => usuarios?.some(u => avaliadoresIds.has(u.id)))) return true;
     }
   } catch { }
   return false;
@@ -862,8 +876,7 @@ async function verificarLembretes() {
 
     if (p.pilotoId) {
       try {
-        const membro = guild?.members.cache.get(p.pilotoId)
-          ?? await guild?.members.fetch(p.pilotoId).catch(() => null);
+        const membro = await buscarMembro(guild, p.pilotoId);
 
         if (membro) {
           const msg = `⏰ **Lembrete de ação pendente!**\n\nVocê ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).${canalUrl ? `\n\nPoste no canal: ${canalUrl}` : ''}`;
@@ -1407,7 +1420,7 @@ client.on('interactionCreate', async (interaction) => {
   // ── /enviar ───────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'enviar') {
     const guild  = client.guilds.cache.get(process.env.GUILD_ID);
-    const member = await guild?.members.fetch(interaction.user.id).catch(() => null);
+    const member = await buscarMembro(guild, interaction.user.id);
 
     const temPiloto    = member?.roles.cache.has(process.env.PILOT_ROLE_ID);
     const temAvaliador = member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
@@ -2014,7 +2027,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     try {
-      const membro = await interaction.guild.members.fetch(dmData.pilotoId);
+      const membro = await buscarMembro(interaction.guild, dmData.pilotoId);
+      if (!membro) throw new Error('Membro não encontrado');
       await membro.send({
         content: `Segue o relatório da sua última ação em **${dmData.acao}** - ${dmData.data}.`,
         files: [dmData.imagePath],
