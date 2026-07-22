@@ -17,7 +17,7 @@ const path = require('path');
 const { generateEstagio } = require('./generateEstagio');
 
 // ── Cargos (podem ser sobrescritos via .env) ───────────────────────────────
-const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1526372144794042498';
+const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1266493758623449159';
 const ESTAGIO_ROLE_ID   = process.env.ESTAGIO_ROLE_ID   || '1516985250666774729';
 
 // Cargo usado para filtrar a lista de sugestões do campo "membro" (autocomplete).
