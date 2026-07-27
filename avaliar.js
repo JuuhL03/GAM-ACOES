@@ -17,16 +17,16 @@ const path = require('path');
 const { generateEstagio } = require('./generateEstagio');
 
 // ── Cargos (podem ser sobrescritos via .env) ───────────────────────────────
-const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1329101772223942751';
+const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1266493758623449159';
 const ESTAGIO_ROLE_ID   = process.env.ESTAGIO_ROLE_ID   || '1516985250666774729';
 
 // Cargo usado para filtrar a lista de sugestões do campo "membro" (autocomplete).
 // Só aparecem no autocomplete os membros que tiverem este cargo.
 const FILTRO_MEMBRO_ROLE_ID = process.env.FILTRO_MEMBRO_ROLE_ID || '1329101772223942751';
 
-// Canal onde a ficha é postada publicamente (opcional).
-// Se não configurado, a ficha é postada no próprio canal do comando.
-const AVALIACOES_CHANNEL_ID = process.env.AVALIACOES_CHANNEL_ID || null;
+// Canal onde a ficha é postada publicamente.
+// Fixado no canal solicitado; pode ser sobrescrito via .env se precisar mudar.
+const AVALIACOES_CHANNEL_ID = process.env.AVALIACOES_CHANNEL_ID || '1531428824678400010';
 
 // ── Persistência ────────────────────────────────────────────────────────────
 const DATA_DIR         = fs.existsSync('/app/data') ? '/app/data' : __dirname;
@@ -264,6 +264,9 @@ async function handleInteraction(interaction, client) {
 
     if (canalDestino) {
       await canalDestino.send({ files: [attachment] });
+    } else {
+      console.warn(`⚠️  Não encontrei o canal ${AVALIACOES_CHANNEL_ID} para postar a ficha. Verifique se o bot está no servidor correto e tem acesso ao canal.`);
+      await interaction.followUp({ content: '⚠️ Não consegui postar a ficha no canal configurado. A avaliação foi salva mesmo assim.', flags: MessageFlags.Ephemeral });
     }
     await interaction.editReply({ content: '✅ Avaliação registrada com sucesso.' });
 
