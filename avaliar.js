@@ -262,13 +262,32 @@ async function handleInteraction(interaction, client) {
           ?? await client.channels.fetch(AVALIACOES_CHANNEL_ID).catch(() => null))
       : interaction.channel;
 
+    let postado = false;
+
     if (canalDestino) {
-      await canalDestino.send({ files: [attachment] });
+      try {
+        await canalDestino.send({ files: [attachment] });
+        postado = true;
+      } catch (e) {
+        console.error(`❌ Erro ao postar ficha no canal ${AVALIACOES_CHANNEL_ID}:`, e);
+        await interaction.followUp({
+          content: `⚠️ Não consegui postar a ficha no canal <#${AVALIACOES_CHANNEL_ID}> (erro: ${e.message}). A avaliação foi salva mesmo assim. Verifique se o bot tem permissão de **Ver Canal**, **Enviar Mensagens** e **Anexar Arquivos** ali.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
     } else {
       console.warn(`⚠️  Não encontrei o canal ${AVALIACOES_CHANNEL_ID} para postar a ficha. Verifique se o bot está no servidor correto e tem acesso ao canal.`);
-      await interaction.followUp({ content: '⚠️ Não consegui postar a ficha no canal configurado. A avaliação foi salva mesmo assim.', flags: MessageFlags.Ephemeral });
+      await interaction.followUp({
+        content: `⚠️ Não encontrei o canal configurado (ID \`${AVALIACOES_CHANNEL_ID}\`). A avaliação foi salva mesmo assim. Confira o AVALIACOES_CHANNEL_ID e se o bot está no servidor correto.`,
+        flags: MessageFlags.Ephemeral,
+      });
     }
-    await interaction.editReply({ content: '✅ Avaliação registrada com sucesso.' });
+
+    await interaction.editReply({
+      content: postado
+        ? '✅ Avaliação registrada com sucesso.'
+        : '✅ Avaliação salva, mas houve um problema ao postar a ficha no canal (veja aviso acima).',
+    });
 
     fs.unlink(imagePath, () => {});
     emAndamento.delete(interaction.user.id);
