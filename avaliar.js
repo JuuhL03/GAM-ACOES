@@ -25,8 +25,9 @@ const ESTAGIO_ROLE_ID   = process.env.ESTAGIO_ROLE_ID   || '1516985250666774729'
 const FILTRO_MEMBRO_ROLE_ID = process.env.FILTRO_MEMBRO_ROLE_ID || '1329101772223942751';
 
 // Canal onde a ficha é postada publicamente.
-// Fixado no canal solicitado; pode ser sobrescrito via .env se precisar mudar.
-const AVALIACOES_CHANNEL_ID = process.env.AVALIACOES_CHANNEL_ID || '1531428824678400010';
+// Hardcoded de propósito: a env var AVALIACOES_CHANNEL_ID é usada por outro fluxo,
+// então esse comando não lê do .env pra evitar colisão de canal.
+const AVALIACOES_CHANNEL_ID = '1526371489434177556';
 
 // ── Persistência ────────────────────────────────────────────────────────────
 const DATA_DIR         = fs.existsSync('/app/data') ? '/app/data' : __dirname;
