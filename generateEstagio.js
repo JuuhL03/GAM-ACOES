@@ -218,12 +218,13 @@ async function generateEstagio(dados) {
   ctx.fillRect(cardX, y, CARD_W, S.divider);
   y += S.divider;
 
-  // ── Meta row ──
+// ── Meta row ──
   const metaCols = [
     { label: 'ESTAGIÁRIO', valor: dados.nome },
     { label: 'DATA',       valor: dados.data },
+    { label: 'AVALIADOR',  valor: dados.avaliadorNome },
   ];
-  const colW = INNER / 2;
+  const colW = INNER / metaCols.length;
   metaCols.forEach((m, i) => {
     const mx = x0 + i * colW;
     ctx.fillStyle = C.gray;
