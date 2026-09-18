@@ -18,6 +18,23 @@ const cron = require('node-cron');
 const fs   = require('fs');
 const path = require('path');
 
+// Cargos que passam a ser cobrados automaticamente por pendências (podem ser
+// sobrescritos via .env). Quem estiver em observação é cobrado mesmo sem esses cargos.
+const PROBATORIO_ROLE_ID = process.env.PROBATORIO_ROLE_ID || '1329095251566006356'; // piloto probatório
+const CADETE_ROLE_ID     = process.env.CADETE_ROLE_ID     || '1328875439891943466'; // piloto cadete
+
+// Demais IDs de cargos/canais/servidor (podem ser sobrescritos via .env).
+// BOT_TOKEN e CLIENT_ID NÃO entram aqui de propósito — token é credencial e
+// nunca deve ter valor padrão no código.
+const ALLOWED_ROLE_ID        = process.env.ALLOWED_ROLE_ID        || '1488309150608785438'; // avaliador/liderança
+const PILOT_ROLE_ID          = process.env.PILOT_ROLE_ID          || '1329101772223942751'; // piloto
+const GUILD_ID               = process.env.GUILD_ID               || '1328875439866908814';
+const THREAD_CHANNEL_ID      = process.env.THREAD_CHANNEL_ID      || '1459351442115526801';
+const PENDENCIAS_CHANNEL_ID  = process.env.PENDENCIAS_CHANNEL_ID  || '1339935245637521478';
+const RELATORIOS_CHANNEL_ID  = process.env.RELATORIOS_CHANNEL_ID  || '1514708221867196627';
+const LOG_CHANNEL_ID         = process.env.LOG_CHANNEL_ID         || '1514745657582420049';
+const SETUP_CHANNEL_ID       = process.env.SETUP_CHANNEL_ID       || '1459351442115526801';
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -34,12 +51,30 @@ const pendingDM       = new Map();
 const threadSetupMsgs = new Map();
 const pendencias      = new Map();
 const resolvidas      = new Set();
+const observados      = new Map(); // pilotoId -> { pilotoNome, addedBy, addedAt }
 
 const DATA_DIR        = fs.existsSync('/app/data') ? '/app/data' : __dirname;
 const THREADS_PATH    = path.join(DATA_DIR, 'pendingThreads.json');
 const PENDENCIAS_PATH = path.join(DATA_DIR, 'pendencias.json');
 const RESOLVIDAS_PATH = path.join(DATA_DIR, 'resolvidas.json');
 const AVALIADOS_PATH  = path.join(DATA_DIR, 'avaliados.json');
+const OBSERVADOS_PATH = path.join(DATA_DIR, 'observados.json');
+
+function loadObservados() {
+  if (fs.existsSync(OBSERVADOS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(OBSERVADOS_PATH, 'utf8'));
+      for (const [k, v] of Object.entries(data)) observados.set(k, v);
+      console.log(`👁️  ${observados.size} membro(s) em observação carregado(s).`);
+    } catch (e) { console.warn('⚠️  Erro ao carregar observados.json:', e.message); }
+  }
+}
+
+function saveObservados() {
+  const obj = {};
+  for (const [k, v] of observados.entries()) obj[k] = v;
+  fs.writeFileSync(OBSERVADOS_PATH, JSON.stringify(obj, null, 2));
+}
 
 const avaliados = [];
 
@@ -226,22 +261,22 @@ async function buscarMembro(guild, userId) {
 
 // ── Helper: verifica permissão ────────────────────────────────────────────────
 async function verificarPermissao(userId) {
-  const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+  const guild  = client.guilds.cache.get(GUILD_ID);
   const member = await buscarMembro(guild, userId);
-  return !!member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+  return !!member?.roles.cache.has(ALLOWED_ROLE_ID);
 }
 
 // ── Helper: constrói mapa de mensagens avaliadas ──────────────────────────────
 async function construirMapaAvaliadas(limit = 200) {
   const mapa = new Map();
-  if (!process.env.THREAD_CHANNEL_ID) return mapa;
+  if (!THREAD_CHANNEL_ID) return mapa;
   try {
-    const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
-    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const canal = await client.channels.fetch(THREAD_CHANNEL_ID);
+    const guild = client.guilds.cache.get(GUILD_ID);
 
     const avaliadoresIds = new Set([client.user.id]);
-    if (process.env.ALLOWED_ROLE_ID && guild) {
-      const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+    if (ALLOWED_ROLE_ID && guild) {
+      const role = guild.roles.cache.get(ALLOWED_ROLE_ID);
       if (role) for (const [id] of role.members) avaliadoresIds.add(id);
     }
 
@@ -285,13 +320,13 @@ async function construirMapaAvaliadas(limit = 200) {
 }
 
 async function jaFoiAvaliadaIndividual(msg) {
-  if (!process.env.THREAD_CHANNEL_ID) return false;
+  if (!THREAD_CHANNEL_ID) return false;
   try {
-    const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
-    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    const canal = await client.channels.fetch(THREAD_CHANNEL_ID);
+    const guild = client.guilds.cache.get(GUILD_ID);
     const avaliadoresIds = new Set([client.user.id]);
-    if (process.env.ALLOWED_ROLE_ID && guild) {
-      const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+    if (ALLOWED_ROLE_ID && guild) {
+      const role = guild.roles.cache.get(ALLOWED_ROLE_ID);
       if (role) for (const [id] of role.members) avaliadoresIds.add(id);
     }
     const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
@@ -515,7 +550,7 @@ async function registrarPendencia(msg) {
   if (pendencias.has(parsed.id)) return false;
   if (resolvidas.has(parsed.id)) return false;
 
-  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  const guild = client.guilds.cache.get(GUILD_ID);
   if (guild) {
     const membro = encontrarMembro(guild, parsed.piloto, parsed.pilotoId);
 
@@ -524,12 +559,16 @@ async function registrarPendencia(msg) {
       return false;
     }
 
-    const nomeReal     = membro.displayName;
-    const temPiloto    = membro.roles.cache.has(process.env.PILOT_ROLE_ID);
-    const temAvaliador = membro.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+    const nomeReal      = membro.displayName;
+    const temAvaliador  = membro.roles.cache.has(ALLOWED_ROLE_ID);
+    const temProbatorio = membro.roles.cache.has(PROBATORIO_ROLE_ID) || membro.roles.cache.has(CADETE_ROLE_ID);
+    const emObservacao  = observados.has(membro.id);
 
     if (temAvaliador) { console.log(`⏭️  Avaliador isento: ${nomeReal}`); return false; }
-    if (!temPiloto)   { console.log(`⏭️  Sem cargo de piloto: ${nomeReal}`); return false; }
+    if (!temProbatorio && !emObservacao) {
+      console.log(`⏭️  Não é probatório/cadete e não está em observação: ${nomeReal}`);
+      return false;
+    }
 
     parsed.piloto   = nomeReal;
     parsed.pilotoId = membro.id;
@@ -708,10 +747,10 @@ function parseMensagemPiloto(message) {
 }
 
 async function buscarResultadoNasPendencias(acao, pilotoNome, dataFormatada) {
-  if (!process.env.PENDENCIAS_CHANNEL_ID) return null;
+  if (!PENDENCIAS_CHANNEL_ID) return null;
 
   try {
-    const canal = await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID);
+    const canal = await client.channels.fetch(PENDENCIAS_CHANNEL_ID);
     const msgs  = await canal.messages.fetch({ limit: 100 });
 
     let melhorResultado = null;
@@ -781,8 +820,9 @@ client.once('ready', async () => {
   loadPendencias();
   loadResolvidas();
   loadAvaliados();
+  loadObservados();
 
-  const mainGuild = client.guilds.cache.get(process.env.GUILD_ID);
+  const mainGuild = client.guilds.cache.get(GUILD_ID);
   if (mainGuild) {
     try {
       await mainGuild.members.fetch();
@@ -807,7 +847,7 @@ client.on('error', (err) => console.error('Erro no client:', err.message));
 
 // ── Helper: envia log para canal de auditoria ───────────────────────────────
 async function enviarLog(tipo, dados) {
-  const canalLog = client.channels.cache.get(process.env.LOG_CHANNEL_ID);
+  const canalLog = client.channels.cache.get(LOG_CHANNEL_ID);
   if (!canalLog) {
     console.warn('⚠️  Canal de log não encontrado');
     return;
@@ -855,9 +895,9 @@ function saveLembretes() {
 
 async function verificarLembretes() {
   const agora    = new Date();
-  const guild    = client.guilds.cache.get(process.env.GUILD_ID);
-  const canalUrl = process.env.THREAD_CHANNEL_ID
-    ? `https://discord.com/channels/${process.env.GUILD_ID}/${process.env.THREAD_CHANNEL_ID}`
+  const guild    = client.guilds.cache.get(GUILD_ID);
+  const canalUrl = THREAD_CHANNEL_ID
+    ? `https://discord.com/channels/${GUILD_ID}/${THREAD_CHANNEL_ID}`
     : null;
 
   for (const [id, p] of pendencias.entries()) {
@@ -901,7 +941,7 @@ async function verificarLembretes() {
 
     if (!estado.avisoAvaliador && p.pilotoId && diffDias >= 2) {
       try {
-        const canal = await client.channels.fetch(process.env.THREAD_CHANNEL_ID).catch(() => null);
+        const canal = await client.channels.fetch(THREAD_CHANNEL_ID).catch(() => null);
         if (canal) {
           const msgs = await canal.messages.fetch({ limit: 50 }).catch(() => null);
           const temVideo = msgs?.some(m =>
@@ -911,7 +951,7 @@ async function verificarLembretes() {
           );
 
           if (temVideo) {
-            const role = guild?.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+            const role = guild?.roles.cache.get(ALLOWED_ROLE_ID);
             if (role) {
               for (const [, avaliador] of role.members) {
                 if (avaliador.user.bot) continue;
@@ -940,10 +980,10 @@ async function verificarLembretes() {
 
 // ── Envio automático de relatório semanal ────────────────────────────────────
 async function enviarRelatorioSemanal() {
-  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  const guild = client.guilds.cache.get(GUILD_ID);
   if (!guild) { console.warn('⚠️  Guild não encontrada'); return; }
 
-  const role = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+  const role = guild.roles.cache.get(ALLOWED_ROLE_ID);
   if (!role) { console.warn('⚠️  Cargo de avaliador não encontrado'); return; }
 
   // Semana atual (quarta a quarta)
@@ -974,7 +1014,7 @@ async function enviarRelatorioSemanal() {
 
       // Lista de ações
       for (const a of stats.acoes) {
-        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
+        const link = a.messageId ? `[Link](https://discord.com/channels/${GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
         msgRelatorios += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
       }
       msgRelatorios += '\n';
@@ -1006,31 +1046,32 @@ async function enviarRelatorioSemanal() {
 
 // ── Mensagens ─────────────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  if (message.author.bot && message.channelId !== process.env.PENDENCIAS_CHANNEL_ID) return;
+  if (message.author.bot && message.channelId !== PENDENCIAS_CHANNEL_ID) return;
 
-  if (process.env.PENDENCIAS_CHANNEL_ID && message.channelId === process.env.PENDENCIAS_CHANNEL_ID) {
+  if (PENDENCIAS_CHANNEL_ID && message.channelId === PENDENCIAS_CHANNEL_ID) {
     await registrarPendencia(message);
     return;
   }
 
-  if (message.channelId !== process.env.THREAD_CHANNEL_ID) return;
+  if (message.channelId !== THREAD_CHANNEL_ID) return;
 
   const temLink    = URL_REGEX.test(message.content);
   const temArquivo = message.attachments.size > 0;
   if (!temLink && !temArquivo) {
     const parsedPiloto = parseMensagemPiloto(message);
     if (parsedPiloto) {
-      const guild  = message.guild ?? client.guilds.cache.get(process.env.GUILD_ID);
+      const guild  = message.guild ?? client.guilds.cache.get(GUILD_ID);
       const membro = guild?.members.cache.get(parsedPiloto.pilotoId);
-      const temPilotoCargo    = membro?.roles.cache.has(process.env.PILOT_ROLE_ID);
-      const temAvaliadorCargo = membro?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+      const temAvaliadorCargo = membro?.roles.cache.has(ALLOWED_ROLE_ID);
+      const temProbatorio     = membro?.roles.cache.has(PROBATORIO_ROLE_ID) || membro?.roles.cache.has(CADETE_ROLE_ID);
+      const emObservacao      = membro ? observados.has(membro.id) : false;
 
       if (temAvaliadorCargo) {
         console.log(`⏭️  Mensagem de avaliador ignorada: ${parsedPiloto.piloto}`);
         return;
       }
-      if (process.env.PILOT_ROLE_ID && !temPilotoCargo) {
-        console.log(`⏭️  Sem cargo de piloto: ${parsedPiloto.piloto}`);
+      if (!temProbatorio && !emObservacao) {
+        console.log(`⏭️  Não é probatório/cadete e não está em observação: ${parsedPiloto.piloto}`);
         return;
       }
 
@@ -1111,7 +1152,7 @@ client.on('messageCreate', async (message) => {
         console.log(`✅ Thread criada via /enviar para ${pilotoNome}`);
 
         const guild       = message.guild;
-        const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+        const allowedRole = guild.roles.cache.get(ALLOWED_ROLE_ID);
         if (allowedRole) {
           const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
           const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${pilotoNome}\n**Acesse a thread:** ${threadLink}`;
@@ -1224,7 +1265,7 @@ client.on('messageCreate', async (message) => {
     console.log(`✅ Thread criada para ${pilotoNome}`);
 
     const guild       = message.guild;
-    const allowedRole = guild.roles.cache.get(process.env.ALLOWED_ROLE_ID);
+    const allowedRole = guild.roles.cache.get(ALLOWED_ROLE_ID);
     if (allowedRole) {
       const threadLink = `https://discord.com/channels/${guild.id}/${thread.id}`;
       const dmTexto    = `📋 **Nova ação recebida, necessária avaliação!**\n\n**Postado por:** ${pilotoNome}\n**Acesse a thread:** ${threadLink}`;
@@ -1242,7 +1283,7 @@ client.on('messageCreate', async (message) => {
 
 // ── Helper: abre selects de avaliação ─────────────────────────────────────────
 async function abrirSelects(interaction) {
-  const allowedRole = process.env.ALLOWED_ROLE_ID;
+  const allowedRole = ALLOWED_ROLE_ID;
   if (allowedRole && !interaction.member.roles.cache.has(allowedRole)) {
     await interaction.reply({ content: '❌ Você não tem permissão para usar isto.', flags: MessageFlags.Ephemeral });
     return;
@@ -1357,7 +1398,7 @@ async function abrirSelects(interaction) {
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const role    = interaction.guild.roles.cache.get(process.env.PILOT_ROLE_ID);
+  const role    = interaction.guild.roles.cache.get(PILOT_ROLE_ID);
   const pilotos = role
     ? role.members.map(m => ({ label: m.displayName, value: m.id })).slice(0, 25)
     : [];
@@ -1419,11 +1460,11 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /enviar ───────────────────────────────────────────────────────────────
   if (interaction.isChatInputCommand() && interaction.commandName === 'enviar') {
-    const guild  = client.guilds.cache.get(process.env.GUILD_ID);
+    const guild  = client.guilds.cache.get(GUILD_ID);
     const member = await buscarMembro(guild, interaction.user.id);
 
-    const temPiloto    = member?.roles.cache.has(process.env.PILOT_ROLE_ID);
-    const temAvaliador = member?.roles.cache.has(process.env.ALLOWED_ROLE_ID);
+    const temPiloto    = member?.roles.cache.has(PILOT_ROLE_ID);
+    const temAvaliador = member?.roles.cache.has(ALLOWED_ROLE_ID);
     if (!temPiloto && !temAvaliador) {
       await interaction.reply({ content: '❌ Você não tem permissão para usar este comando.', flags: MessageFlags.Ephemeral });
       return;
@@ -1506,8 +1547,8 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.reply({ content: '⏳ Verificando pendências...', flags: MessageFlags.Ephemeral });
 
     try {
-      const msgsPendencias = process.env.PENDENCIAS_CHANNEL_ID
-        ? await client.channels.fetch(process.env.PENDENCIAS_CHANNEL_ID)
+      const msgsPendencias = PENDENCIAS_CHANNEL_ID
+        ? await client.channels.fetch(PENDENCIAS_CHANNEL_ID)
             .then(canal => canal.messages.fetch({ limit: 100 }))
             .catch(() => null)
         : null;
@@ -1610,7 +1651,7 @@ client.on('interactionCreate', async (interaction) => {
       msg += `└─ ❌ ${st.derrota}x Derrota${st.derrota !== 1 ? 's' : ''}\n\n`;
 
       for (const a of st.acoes) {
-        const link = a.messageId ? `[Link](https://discord.com/channels/${process.env.GUILD_ID}/${process.env.THREAD_CHANNEL_ID}/${a.messageId})` : '—';
+        const link = a.messageId ? `[Link](https://discord.com/channels/${GUILD_ID}/${THREAD_CHANNEL_ID}/${a.messageId})` : '—';
         msg += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
       }
       msg += '\n';
@@ -1801,6 +1842,73 @@ client.on('interactionCreate', async (interaction) => {
     });
 
     console.log(`🗑️  Pendências limpas: ${total} removida(s)`);
+    return;
+  }
+
+  // ── /observacao (adicionar / remover / listar) ──────────────────────────────
+  if (interaction.isChatInputCommand() && interaction.commandName === 'observacao') {
+    if (!await verificarPermissao(interaction.user.id)) {
+      await interaction.reply({ content: '❌ Você não tem permissão.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const sub = interaction.options.getSubcommand();
+
+    if (sub === 'adicionar') {
+      const alvo   = interaction.options.getUser('membro', true);
+      const guild  = client.guilds.cache.get(GUILD_ID);
+      const membro = await buscarMembro(guild, alvo.id);
+      const nome   = membro?.displayName ?? alvo.username;
+
+      observados.set(alvo.id, {
+        pilotoNome: nome,
+        addedBy:    interaction.user.id,
+        addedAt:    new Date().toISOString(),
+      });
+      saveObservados();
+
+      await interaction.reply({
+        content: `👁️ **${nome}** está agora em observação.\nTodas as ações dele(a) passam a ser cobradas (pendência criada), independente do cargo, até que a observação seja removida com \`/observacao remover\`.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      console.log(`👁️  Observação adicionada: ${nome} (por ${interaction.user.username})`);
+      return;
+    }
+
+    if (sub === 'remover') {
+      const alvo  = interaction.options.getUser('membro', true);
+      const dados = observados.get(alvo.id);
+      const havia = observados.delete(alvo.id);
+      saveObservados();
+
+      await interaction.reply({
+        content: havia
+          ? `✅ **${dados?.pilotoNome ?? alvo.username}** foi removido(a) da observação. Volta a valer o cargo dele(a) para cobrança.`
+          : `⚠️ **${alvo.username}** não estava em observação.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      console.log(`✅ Observação removida: ${alvo.username} (por ${interaction.user.username})`);
+      return;
+    }
+
+    if (sub === 'listar') {
+      if (!observados.size) {
+        await interaction.reply({ content: '👁️ Ninguém está em observação no momento.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const linhas = [...observados.entries()].map(([id, o]) => {
+        const desde = new Date(o.addedAt).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+        return `• **${o.pilotoNome}** (<@${id}>) — desde ${desde}`;
+      });
+
+      await interaction.reply({
+        content: `👁️ **Membros em observação (${observados.size}):**\n\n${linhas.join('\n')}`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     return;
   }
 
@@ -2065,7 +2173,7 @@ async function finalizarThread(dmData) {
 
   if (dmData.originalMsgId) {
     try {
-      const canal       = await client.channels.fetch(process.env.THREAD_CHANNEL_ID);
+      const canal       = await client.channels.fetch(THREAD_CHANNEL_ID);
       const originalMsg = await canal.messages.fetch(dmData.originalMsgId);
       await originalMsg.react('1330606335988990045');
       console.log('✅ Reação adicionada na mensagem original.');
@@ -2089,11 +2197,11 @@ async function gerarEPostar(interaction, dados) {
     await canal.send({ files: [imagePath] });
 
     // ── Enviar para canal de relatórios ──
-    const canalRelatorios = client.channels.cache.get(process.env.RELATORIOS_CHANNEL_ID);
+    const canalRelatorios = client.channels.cache.get(RELATORIOS_CHANNEL_ID);
     if (canalRelatorios) {
       const mencaoPiloto = dados.pilotoId ? `<@${dados.pilotoId}>` : dados.pilotoNome;
       const linkOriginal = dados.originalMsgId 
-        ? `https://discord.com/channels/${process.env.GUILD_ID}/${process.env.THREAD_CHANNEL_ID}/${dados.originalMsgId}`
+        ? `https://discord.com/channels/${GUILD_ID}/${THREAD_CHANNEL_ID}/${dados.originalMsgId}`
         : null;
 
       const embed = {
