@@ -16,20 +16,12 @@ const fs   = require('fs');
 const path = require('path');
 const { generateEstagio } = require('./generateEstagio');
 
-// ── Cargos (podem ser sobrescritos via .env) ───────────────────────────────
-const AVALIADOR_ROLE_ID = process.env.AVALIADOR_ROLE_ID || '1329101772223942751';
-const ESTAGIO_ROLE_ID   = process.env.ESTAGIO_ROLE_ID   || '1516985250666774729';
+const AVALIADOR_ROLE_ID     = process.env.AVALIADOR_ROLE_ID     || '1329101772223942751'; // avaliador — quem pode rodar /avaliar
+const ESTAGIO_ROLE_ID       = process.env.ESTAGIO_ROLE_ID       || '1516985250666774729'; // estagiário — elegível a ser avaliado
+const FILTRO_MEMBRO_ROLE_ID = process.env.FILTRO_MEMBRO_ROLE_ID || '1329101772223942751'; // filtra as sugestões do campo "membro" no autocomplete
 
-// Cargo usado para filtrar a lista de sugestões do campo "membro" (autocomplete).
-// Só aparecem no autocomplete os membros que tiverem este cargo.
-const FILTRO_MEMBRO_ROLE_ID = process.env.FILTRO_MEMBRO_ROLE_ID || '1329101772223942751';
-
-// Canal onde a ficha é postada publicamente.
-// Hardcoded de propósito: a env var AVALIACOES_CHANNEL_ID é usada por outro fluxo,
-// então esse comando não lê do .env pra evitar colisão de canal.
+// Canal onde a ficha é postada publicamente -- diferente dos relatórios de ações
 const AVALIACOES_CHANNEL_ID = '1526371489434177556';
-
-// ── Persistência ────────────────────────────────────────────────────────────
 const DATA_DIR         = fs.existsSync('/app/data') ? '/app/data' : __dirname;
 const AVALIACOES_PATH  = path.join(DATA_DIR, 'avaliacoesEstagio.json');
 
@@ -67,7 +59,6 @@ function dataHojeBR() {
   return new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 }
 
-// ── Helper: busca membro priorizando cache (evita chamada de rede desnecessária) ──
 async function buscarMembro(guild, userId) {
   if (!guild || !userId) return null;
   return guild.members.cache.get(userId)
@@ -176,7 +167,7 @@ async function handleInteraction(interaction, client) {
     return true;
   }
 
-  // ── Clique num botão de conceito ─────────────────────────────────────────
+  // ── Clique (botões de avaliação ótimo/bom/regular) ─────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith('aval_resp_')) {
     const conceito = interaction.customId.replace('aval_resp_', '');
     const state = emAndamento.get(interaction.user.id);
@@ -189,13 +180,11 @@ async function handleInteraction(interaction, client) {
     state.criterios[state.indice].conceito = conceito;
     state.indice += 1;
 
-    // Ainda há critérios pendentes → mostra o próximo
     if (state.indice < state.criterios.length) {
       await interaction.update(montarPassoAtual(state));
       return true;
     }
 
-    // Último critério respondido → abre modal de observações antes de gerar a ficha
     const modal = new ModalBuilder()
       .setCustomId('aval_obs')
       .setTitle('Observações finais');

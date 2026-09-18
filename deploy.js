@@ -6,22 +6,17 @@ const {
   InteractionContextType,
 } = require('discord.js');
 const avaliarCmd = require('./avaliar');
-
-// IDs públicos (não são segredo) — podem ser sobrescritos via .env.
-// BOT_TOKEN fica de fora de propósito: é credencial e nunca deve ter valor padrão no código.
 const CLIENT_ID = process.env.CLIENT_ID || '1487702951374880910';
 const GUILD_ID  = process.env.GUILD_ID  || '1328875439866908814';
-
-// Contextos onde o comando pode ser usado: dentro do servidor E em DM com o bot
 const CONTEXTS = [InteractionContextType.Guild, InteractionContextType.BotDM];
 
 const commands = [
 
-  avaliarCmd.buildCommand(), // /avaliar — guild-only (definido no próprio avaliar.js)
+  avaliarCmd.buildCommand(),
 
   new SlashCommandBuilder()
     .setName('pendencias')
-    .setDescription('Lista as pendências de envio em aberto (últimos 7 dias)')
+    .setDescription('Lista todas as pendências de envio em aberto')
     .setContexts(CONTEXTS),
 
   new SlashCommandBuilder()

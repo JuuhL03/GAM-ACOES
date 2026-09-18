@@ -18,22 +18,15 @@ const cron = require('node-cron');
 const fs   = require('fs');
 const path = require('path');
 
-// Cargos que passam a ser cobrados automaticamente por pendências (podem ser
-// sobrescritos via .env). Quem estiver em observação é cobrado mesmo sem esses cargos.
-const PROBATORIO_ROLE_ID = process.env.PROBATORIO_ROLE_ID || '1329095251566006356'; // piloto probatório
-const CADETE_ROLE_ID     = process.env.CADETE_ROLE_ID     || '1328875439891943466'; // piloto cadete
-
-// Demais IDs de cargos/canais/servidor (podem ser sobrescritos via .env).
-// BOT_TOKEN e CLIENT_ID NÃO entram aqui de propósito — token é credencial e
-// nunca deve ter valor padrão no código.
-const ALLOWED_ROLE_ID        = process.env.ALLOWED_ROLE_ID        || '1488309150608785438'; // avaliador/liderança
-const PILOT_ROLE_ID          = process.env.PILOT_ROLE_ID          || '1329101772223942751'; // piloto
-const GUILD_ID               = process.env.GUILD_ID               || '1328875439866908814';
-const THREAD_CHANNEL_ID      = process.env.THREAD_CHANNEL_ID      || '1459351442115526801';
-const PENDENCIAS_CHANNEL_ID  = process.env.PENDENCIAS_CHANNEL_ID  || '1339935245637521478';
-const RELATORIOS_CHANNEL_ID  = process.env.RELATORIOS_CHANNEL_ID  || '1514708221867196627';
-const LOG_CHANNEL_ID         = process.env.LOG_CHANNEL_ID         || '1514745657582420049';
-const SETUP_CHANNEL_ID       = process.env.SETUP_CHANNEL_ID       || '1459351442115526801';
+const ALLOWED_ROLE_ID       = process.env.ALLOWED_ROLE_ID       || '1488309150608785438'; // avaliador/liderança — permissão de comandos administrativos, isento de cobrança
+const PILOT_ROLE_ID         = process.env.PILOT_ROLE_ID         || '1329101772223942751'; // piloto — pode usar o /enviar e aparecer como avaliado
+const PROBATORIO_ROLE_ID    = process.env.PROBATORIO_ROLE_ID    || '1329095251566006356'; // piloto probatório — cobrado automaticamente por pendências
+const CADETE_ROLE_ID        = process.env.CADETE_ROLE_ID        || '1328875439891943466'; // piloto cadete — cobrado automaticamente por pendências
+const GUILD_ID              = process.env.GUILD_ID              || '1328875439866908814'; // servidor onde o bot opera
+const THREAD_CHANNEL_ID     = process.env.THREAD_CHANNEL_ID     || '1459351442115526801'; // canal onde pilotos postam ações e o bot cria as threads de avaliação
+const PENDENCIAS_CHANNEL_ID = process.env.PENDENCIAS_CHANNEL_ID || '1339935245637521478'; // canal com os embeds de pendência lidos por /pendencias
+const RELATORIOS_CHANNEL_ID = process.env.RELATORIOS_CHANNEL_ID || '1514708221867196627'; // canal usado para montar o link de cada ação nos relatórios
+const LOG_CHANNEL_ID        = process.env.LOG_CHANNEL_ID        || '1514745657582420049'; // canal de auditoria (enviarLog)
 
 const client = new Client({
   intents: [
@@ -51,8 +44,7 @@ const pendingDM       = new Map();
 const threadSetupMsgs = new Map();
 const pendencias      = new Map();
 const resolvidas      = new Set();
-const observados      = new Map(); // pilotoId -> { pilotoNome, addedBy, addedAt }
-
+const observados      = new Map();
 const DATA_DIR        = fs.existsSync('/app/data') ? '/app/data' : __dirname;
 const THREADS_PATH    = path.join(DATA_DIR, 'pendingThreads.json');
 const PENDENCIAS_PATH = path.join(DATA_DIR, 'pendencias.json');
@@ -252,21 +244,18 @@ function getTotalAvaliadosStats() {
   return stats;
 }
 
-// ── Helper: busca membro priorizando cache (evita chamada de rede desnecessária) ──
 async function buscarMembro(guild, userId) {
   if (!guild || !userId) return null;
   return guild.members.cache.get(userId)
     ?? await guild.members.fetch(userId).catch(() => null);
 }
 
-// ── Helper: verifica permissão ────────────────────────────────────────────────
 async function verificarPermissao(userId) {
   const guild  = client.guilds.cache.get(GUILD_ID);
   const member = await buscarMembro(guild, userId);
   return !!member?.roles.cache.has(ALLOWED_ROLE_ID);
 }
 
-// ── Helper: constrói mapa de mensagens avaliadas ──────────────────────────────
 async function construirMapaAvaliadas(limit = 200) {
   const mapa = new Map();
   if (!THREAD_CHANNEL_ID) return mapa;
@@ -365,7 +354,7 @@ const ALIASES = {
   'Banco Central':         ['central', 'banco central', 'central bank'],
   'Nióbio Humane':         ['niobio', 'nióbio', 'humane', 'niobio humane', 'nióbio humane'],
   'Joalheria':             ['joalheria', 'jewelry', 'joia', 'joias'],
-  'Carro Forte Açougue':   ['carro forte acougue', 'carro forte açougue', 'açougue', 'acougue'],
+  'Carro Forte Açougue':   ['carro forte acougue', 'carro forte açougue', 'açougue', 'acougue', 'cf'],
   'Carro Forte Groove':    ['carro forte groove', 'groove'],
   'Carro Forte Faculdade': ['carro forte faculdade', 'faculdade'],
 };
@@ -922,14 +911,13 @@ async function verificarLembretes() {
           const msg = `⏰ **Lembrete de ação pendente!**\n\nVocê ainda não enviou o vídeo da sua ação **${p.acao ?? '—'}** (${p.dataFormatada ?? '—'}).${canalUrl ? `\n\nPoste no canal: ${canalUrl}` : ''}`;
           await membro.send(msg);
           console.log(`⏰ Lembrete enviado: ${p.piloto} — ${p.acao}`);
-          
-          // Registra no log
+
           await enviarLog('⏰ Lembrete de PENDÊNCIA Enviado', {
             piloto: p.piloto,
             acao: p.acao,
             data: p.dataFormatada,
           });
-          
+
           estado.ultimoLembrete = agora.toISOString();
           lembretes.set(id, estado);
           saveLembretes();
@@ -986,7 +974,6 @@ async function enviarRelatorioSemanal() {
   const role = guild.roles.cache.get(ALLOWED_ROLE_ID);
   if (!role) { console.warn('⚠️  Cargo de avaliador não encontrado'); return; }
 
-  // Semana atual (quarta a quarta)
   const hoje = new Date();
   const semanaStart = getWeekStart(hoje);
   const semanaEnd = new Date(semanaStart);
@@ -999,7 +986,6 @@ async function enviarRelatorioSemanal() {
       return dias <= 7;
     });
 
-  // Monta mensagens
   let msgRelatorios = `📊 **Relatório da Semana** (${semanaStart.toLocaleDateString('pt-BR')})\n\n`;
 
   if (statsRelatorios.size === 0) {
@@ -1012,9 +998,8 @@ async function enviarRelatorioSemanal() {
       msgRelatorios += `├─ ✅ ${stats.vitoria}x Vitória${stats.vitoria !== 1 ? 's' : ''}\n`;
       msgRelatorios += `└─ ❌ ${stats.derrota}x Derrota${stats.derrota !== 1 ? 's' : ''}\n\n`;
 
-      // Lista de ações
       for (const a of stats.acoes) {
-        const link = a.messageId ? `[Link](https://discord.com/channels/${GUILD_ID}/1459351442115526801/${a.messageId})` : '—';
+        const link = a.messageId ? `[Link](https://discord.com/channels/${GUILD_ID}/${THREAD_CHANNEL_ID}/${a.messageId})` : '—';
         msgRelatorios += `  ${a.data} - ${a.acao} - ${a.resultado ?? '—'} ${link}\n`;
       }
       msgRelatorios += '\n';
@@ -1031,7 +1016,6 @@ async function enviarRelatorioSemanal() {
     }
   }
 
-  // Envia para todos os avaliadores
   for (const [, membro] of role.members) {
     if (membro.user.bot) continue;
     try {
@@ -1578,18 +1562,17 @@ client.on('interactionCreate', async (interaction) => {
 
       const agora = new Date();
       const lista = [...pendencias.entries()]
-        .filter(([, p]) => (agora - new Date(p.timestamp)) / (1000 * 60 * 60 * 24) <= 7)
         .sort((a, b) => new Date(a[1].timestamp) - new Date(b[1].timestamp));
 
       if (lista.length === 0) {
-        const msgVazia = `✅ **Nenhuma pendência em aberto nos últimos 7 dias!**\n` +
+        const msgVazia = `✅ **Nenhuma pendência em aberto!**\n` +
           (importados > 0 ? `_(${importados} importada(s), todas resolvidas ou isentas)_` : '');
         await interaction.user.send(msgVazia);
         await interaction.editReply({ content: '✅ Verificado — nenhuma pendência em aberto!' });
         return;
       }
 
-      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões) nos últimos 7 dias**` +
+      const cabecalho = `📋 **Pendências em aberto — ${lista.length} ação(ões)**` +
         (importados > 0 ? ` _(+${importados} importada(s) agora)_` : '') + '\n';
 
       const linhas = [cabecalho];
@@ -2196,7 +2179,6 @@ async function gerarEPostar(interaction, dados) {
 
     await canal.send({ files: [imagePath] });
 
-    // ── Enviar para canal de relatórios ──
     const canalRelatorios = client.channels.cache.get(RELATORIOS_CHANNEL_ID);
     if (canalRelatorios) {
       const mencaoPiloto = dados.pilotoId ? `<@${dados.pilotoId}>` : dados.pilotoNome;
